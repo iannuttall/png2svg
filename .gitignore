@@ -1,0 +1,30 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+
+# Virtual environments
+.venv
+
+# Reconstruction projects: source artwork, renders and comparison images.
+# Not published — the source images belong to their owners and the
+# comparison PNGs are large. Everything here is reproducible from the
+# documented commands.
+work/
+
+# Reconstructions of artwork that is not ours to redistribute.
+# Kept locally; remove these lines to publish them.
+output.svg
+output-seo.svg
+output-seo-dark.svg
+output-m.svg
+output-m-tight.svg
+examples/measure_s.py
+examples/build_s_model.py
+examples/build_s_seo_model.py
+examples/measure_m.py
+examples/build_m_model.py
