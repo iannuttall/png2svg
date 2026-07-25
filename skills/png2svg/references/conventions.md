@@ -103,11 +103,20 @@ have candidate stops, refit the stop *positions* against all interior pixels
 with the colours fixed; offsets that land on 0.5 or 0/1 are the designer's,
 not a coincidence.
 
-## 7. Counters need opposite winding
+## 7. Counters: winding or fill-rule
 
-There is no `fill-rule` support in the generator. A second subpath only cuts
-a hole if it runs the **opposite way round** from the outer path, so the
-nonzero rule cancels it. Trace both, then reverse the inner one.
+A second subpath cuts a hole either by running the **opposite way round**
+from the outer path (the nonzero rule then cancels it), or by setting
+`"fill_rule": "evenodd"` on the shape, which cuts regardless of direction.
+
+Winding is the default and keeps the path portable. Reach for `evenodd` when
+the consumer expects it, or when the two subpaths come from separate traces
+whose directions you would otherwise have to reason about.
+
+Either way the hole must be a real hole. A background-coloured shape laid on
+top looks identical until the artwork is recoloured or composited onto
+anything else, at which point the "hole" turns opaque — which is exactly how
+it fails in a macOS tinted icon variant.
 
 ## 8. Straight-edged logos: fit lines, intersect for vertices
 

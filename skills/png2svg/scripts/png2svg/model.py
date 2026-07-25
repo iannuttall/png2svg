@@ -65,6 +65,11 @@ def validate_shape(shape: dict[str, Any]) -> None:
                 f"shape {shape.get('id')!r}: {cmd} expects "
                 f"{SEGMENT_ARITY[cmd]} numbers, got {len(seg) - 1}"
             )
+    rule = shape.get("fill_rule", "nonzero")
+    if rule not in ("nonzero", "evenodd"):
+        raise ModelError(
+            f"shape {shape.get('id')!r}: fill_rule must be 'nonzero' or 'evenodd'"
+        )
     fills = shape.get("fills")
     stroke = shape.get("stroke")
     if not isinstance(fills, list):

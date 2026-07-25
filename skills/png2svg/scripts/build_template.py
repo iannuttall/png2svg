@@ -72,7 +72,8 @@ def subpath(names, close=True):
 # ==== EDIT: shapes =========================================================
 # Order matters: shapes paint in list order, so later shapes sit on top.
 # A counter (hole) is a second subpath in the SAME shape, wound the OPPOSITE
-# way round — there is no fill-rule, so that is what cuts the hole.
+# way round, which is what cuts the hole under the nonzero rule. Setting
+# "fill_rule": "evenodd" on the shape cuts it regardless of direction.
 #
 # Fill types: solid / linear / radial / conic. Any fill may add
 # "rect": [x, y, w, h] to bound its region. Conic angles are degrees with

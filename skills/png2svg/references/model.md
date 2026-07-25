@@ -51,8 +51,10 @@ Segments are JSON arrays, absolute coordinates only:
 | `["Z"]` | 0 | close subpath |
 
 Multiple subpaths live in one `d`. A counter (hole) must be wound **opposite**
-to the outer subpath — there is no `fill-rule` support, so the nonzero rule
-is what cuts the hole.
+to the outer subpath, so the nonzero rule cuts it — or set
+`"fill_rule": "evenodd"` on the shape, which cuts a hole regardless of the
+subpaths' direction. `fill_rule` accepts `"nonzero"` (default, and the
+attribute is then omitted) or `"evenodd"`.
 
 ## Fills
 

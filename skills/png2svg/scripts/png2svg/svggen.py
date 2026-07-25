@@ -207,6 +207,11 @@ def generate_svg(project: Project) -> str:
     for shape in project.shapes:
         sid = shape["id"]
         d = path_data(shape["d"])
+        # evenodd lets a compound path carry a real hole without relying on
+        # subpath winding — the only way to cut a shape that stays a hole
+        # when the artwork is recoloured or composited on anything else
+        rule = shape.get("fill_rule", "nonzero")
+        fr = f' fill-rule="{rule}"' if rule != "nonzero" else ""
         clip_needed = len(shape["fills"]) > 1 or any(
             f["type"] == "conic" for f in shape["fills"]
         )
@@ -223,14 +228,14 @@ def generate_svg(project: Project) -> str:
                 if clip_needed:
                     body.append(_layer_target(d, fill, op_attr, li, paint, vb))
                 else:
-                    body.append(f'<path d="{d}" fill="{fill}"{op_attr}/>')
+                    body.append(f'<path d="{d}" fill="{fill}"{fr}{op_attr}/>')
             elif ptype in ("linear", "radial"):
                 defs.append(_gradient_def(pid, paint))
                 fill = f"url(#{pid})"
                 if clip_needed:
                     body.append(_layer_target(d, fill, op_attr, li, paint, vb))
                 else:
-                    body.append(f'<path d="{d}" fill="{fill}"{op_attr}/>')
+                    body.append(f'<path d="{d}" fill="{fill}"{fr}{op_attr}/>')
             elif ptype == "conic":
                 _conic_svg(pid, paint, defs, body)
         if clip_needed:

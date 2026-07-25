@@ -610,3 +610,34 @@ class TestTextureAwareScoring:
         bad = cmp.compare(clean, wrong_img, (255, 255, 255))
         # a genuinely wrong colour survives blurring — this must not be forgiven
         assert bad["deltaE_lowfreq_mean"] > 10
+
+
+class TestFillRule:
+    """A real hole in a compound path — the only cut that survives being
+    recoloured or composited onto something other than its own background."""
+
+    def donut(self, rule):
+        return {"id": "d", "type": "path", "fill_rule": rule,
+                "d": [["M", 10, 50], ["A", 40, 40, 0, 1, 1, 90, 50],
+                      ["A", 40, 40, 0, 1, 1, 10, 50], ["Z"],
+                      ["M", 30, 50], ["A", 20, 20, 0, 1, 1, 70, 50],
+                      ["A", 20, 20, 0, 1, 1, 30, 50], ["Z"]],
+                "fills": [{"type": "solid", "color": "#000000"}]}
+
+    def test_evenodd_cuts_a_hole_that_same_winding_would_not(self):
+        even = render_svg(generate_svg(make_project([self.donut("evenodd")])), 100, 100)
+        non = render_svg(generate_svg(make_project([self.donut("nonzero")])), 100, 100)
+        # both subpaths wind the same way, so only evenodd leaves a hole
+        assert np.asarray(even)[50, 50, 3] == 0
+        assert np.asarray(non)[50, 50, 3] == 255
+        # the ring itself is filled either way
+        assert np.asarray(even)[50, 15, 3] == 255
+
+    def test_attribute_only_emitted_when_needed(self):
+        assert 'fill-rule="evenodd"' in generate_svg(
+            make_project([self.donut("evenodd")]))
+        assert "fill-rule" not in generate_svg(make_project([self.donut("nonzero")]))
+
+    def test_rejects_an_unknown_rule(self):
+        with pytest.raises(ModelError, match="fill_rule"):
+            validate_shape(self.donut("winding"))
