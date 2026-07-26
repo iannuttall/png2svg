@@ -219,3 +219,59 @@ def fit_linear_gradient(rgb: np.ndarray, mask: np.ndarray, *,
         "axis_deg": float(theta),
         "rms": float(rms),
     }
+
+
+def fit_shared_ramp(rgb: np.ndarray, pieces, *, n_stops: int = 2,
+                    erode: int = 9, exclude: np.ndarray | None = None) -> dict:
+    """One ramp shared by several shapes, each in its own local coordinates.
+
+    A duplicated element carries its gradient with it, so N copies show N
+    ramps that are the *same* ramp in each copy's own span. Fitting them
+    separately wastes the constraint and, worse, each copy usually exposes
+    only part of its ramp -- so a per-copy fit extrapolates from a narrow
+    window and the copies disagree about the end stops.
+
+    The tell that you are in this situation is a colour DISCONTINUITY where
+    two copies meet: one ends saturated exactly where its neighbour restarts
+    light. A single gradient across the pair cannot produce that, and
+    `fit_linear_gradient` over the union will report non-monotonic stops as it
+    tries.
+
+    `pieces` is a list of `(mask, t0, t1)`: the shape's own pixels and the two
+    values of the gradient axis that bound *that copy*. Only vertical ramps
+    are handled -- t0/t1 are y. Pass `exclude` (a boolean mask) to keep a
+    watermark or overlay out of the fit.
+
+    Returns `{"stops": [...], "rms": float, "n": int}`; feed the stops to a
+    linear paint per shape with that shape's own y1/y2.
+    """
+    us, cs = [], []
+    for mask, t0, t1 in pieces:
+        keep = ndimage.distance_transform_edt(mask) >= erode
+        if exclude is not None:
+            keep = keep & ~exclude
+        if keep.sum() < 50:
+            continue
+        ys = np.nonzero(keep)[0] + 0.5
+        us.append(np.clip((ys - t0) / (t1 - t0), 0.0, 1.0))
+        cs.append(rgb[keep].astype(np.float64))
+    if not us:
+        raise ValueError("no piece had enough interior pixels; lower `erode`")
+    u = np.concatenate(us)
+    c = np.concatenate(cs)
+
+    knots = np.linspace(0.0, 1.0, n_stops)
+    B = _basis(u, knots)
+    cols, *_ = np.linalg.lstsq(B, c, rcond=None)
+    cols = _round_channels(cols, c)
+    rms = float(np.sqrt((((B @ cols) - c) ** 2).sum(1)).mean())
+    return {
+        "stops": [
+            {"offset": float(round(o, 5)),
+             "color": "#{:02x}{:02x}{:02x}".format(
+                 *np.clip(np.round(col), 0, 255).astype(int))}
+            for o, col in zip(knots, cols)
+        ],
+        "rms": rms,
+        "n": int(len(u)),
+    }

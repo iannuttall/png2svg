@@ -165,3 +165,64 @@ fixed. Offsets that land exactly on 0.5, or an axis that passes precisely
 through the artwork's centre, are the designer's decisions rather than
 coincidences — and a palette whose channels repeat across stops is a good
 sign the fit found the real construction rather than a local minimum.
+
+## Overlapping primitives: a slanted "S" of three bars (1500x1125 WebP)
+
+The case where tracing is the wrong tool. Read it before reaching for
+`segment_outline` on anything that might be built from repeated shapes.
+
+The silhouette is a Z with two notches, ten straight runs and ten corners —
+`analyse` reports exactly that, and traced it costs around forty nodes. But
+the corner radii it returns are the giveaway: four at ~17.0-17.4, two that fit
+as 122.7, and two at ~2.5. A designer does not use five radii on one outline.
+The 122.7 pair were shallow corners measured with too wide a window
+(convention 3), and the ~2.5 pair were not corners at all — they were the
+points where two shapes cross.
+
+Three tells said "overlapping primitives", and any one would have been enough:
+
+- **A seam collinear with a silhouette edge.** The lower-left outer edge,
+  extended up past the notch, continued as the pink/blue colour seam to within
+  0.05px over 300px. One line serving as an outer boundary in one place and an
+  interior seam in another means two shapes sharing an edge.
+- **A spacing that repeats.** 142.979 between the two left slant lines,
+  143.002 between the two right ones.
+- **A middle colour that is exactly an overlap.** Pink band 144px wide, cyan
+  band 144px wide, and the blue between them widening from 147 to 314 exactly
+  as the two Z-bands' intersection would.
+
+What it actually is: three rounded parallelograms sharing one slant, with 180°
+symmetry about `(750.541, 559.487)`. Two congruent Z-bands (pink = upper-left
+rect + lower rect; cyan = the 180° rotation of it) overlap, and the overlap is
+a separate flat fill.
+
+    U   = [cx-a, cx-a+2b] x [cy-g, cy+k]     pink upper
+    P2  = [cx-b, cx+b   ] x [cy-g, cy+g]     = pink lower + cyan upper
+    Lo' = [cx+a-2b, cx+a] x [cy-k, cy+g]     cyan lower
+
+Eight numbers — slant `128.39244`, centre, `a`, `b`, `g`, `k`, radius
+`17.2655` — fixed all of it via `primitives.fit_union` against 2087 contour
+points: **mean 0.080px, p95 0.221px**. The band offset (`a - b` = 143.049) and
+each short rect's width (`2b`) fell out of the symmetry; both had been measured
+independently first, and their agreement to 0.02px is what confirmed the
+decomposition before anything was derived from it.
+
+Three things this mark taught that generalise:
+
+1. **The overlap's corners are free.** Blue is `pink ∩ cyan`, and it decomposes
+   into three more rounded parallelograms whose every corner is a genuine
+   corner of one of the four band rects. So all twelve of its fillets are the
+   artwork's own `r`; none had to be invented for an intersection.
+2. **Each parallelogram carries its own ramp.** There is a hard colour jump at
+   the seam tip — the upper rect ends `#fd30f8` where the lower restarts
+   `#fc59e9`. Four gradients, not two, and the two rects of a band share one
+   ramp in local y (`paint.fit_shared_ramp`, rms 1.7 pooled).
+3. **The blue overlap is flat**, at `#4548e9` with a spread of 0.8. Worth
+   checking before assuming a blend mode: a multiply of two gradients would not
+   be flat, so this was drawn as its own shape.
+
+Final: IoU 0.9988, edge mean 0.081px, ΔE mean 0.91, p95 2.52, at 63 nodes and
+2.8KB. The ΔE max of 58.9 is a "logo for sale" watermark badge that was
+deliberately not reconstructed, and the rest of the residual is the source's
+own sharpening ringing — it undershoots to `(200,89,181)` one pixel inside
+edges, darker than either side, which no clean vector can or should match.

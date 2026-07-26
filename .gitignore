@@ -28,6 +28,7 @@ examples/build_s_model.py
 examples/build_s_seo_model.py
 examples/measure_m.py
 examples/build_m_model.py
+examples/build_swipe_s_model.py
 
 # macOS
 .DS_Store

@@ -340,6 +340,7 @@ def analyse_image(img: Image.Image, background) -> tuple[dict, Image.Image]:
             "paint": paint,
             "n_contour_points": len(contour),
             "n_corners": n_corners,
+            "structure": detect_structure(comp, segments),
             "segments": segments,
         })
         # overlay: lines red, arc chords blue, curves yellow, corners white
@@ -349,3 +350,203 @@ def analyse_image(img: Image.Image, background) -> tuple[dict, Image.Image]:
             draw.line([tuple(s["p0"]), tuple(s["p1"])], fill=colour, width=2)
 
     return features, overlay
+
+
+# --------------------------------------------------------------------------
+# Structure detection: is this ONE shape, or the same shape stamped several
+# times? Every number needed is already measured above -- this just compares
+# them to each other and says what it finds, because that comparison is the
+# judgment an agent otherwise re-derives by hand on every repeated-shape mark
+# (SKILL.md section 2).
+# --------------------------------------------------------------------------
+
+def _coord_set(mask: np.ndarray):
+    ys, xs = np.nonzero(mask)
+    return ys, xs, mask.shape
+
+
+def _overlap(ys, xs, mask, ys2, xs2) -> float:
+    """|A n B| / |A| for integer coordinate lists, B given by ys2/xs2."""
+    h, w = mask.shape
+    ok = (ys2 >= 0) & (ys2 < h) & (xs2 >= 0) & (xs2 < w)
+    if not ok.any():
+        return 0.0
+    return float(mask[ys2[ok], xs2[ok]].sum()) / float(len(ys))
+
+
+def _iou_of_map(ys, xs, mask, ys2, xs2) -> float:
+    inter = _overlap(ys, xs, mask, ys2, xs2) * len(ys)
+    return float(inter / (2 * len(ys) - inter)) if len(ys) else 0.0
+
+
+def detect_symmetry(mask: np.ndarray, min_iou: float = 0.97) -> dict:
+    """180-degree and mirror symmetry about the centroid.
+
+    A shape symmetric under one of these has its centroid at the centre, so
+    there is nothing to search. Doubling the centroid before rounding keeps
+    half-pixel centres exact.
+    """
+    ys, xs, _ = _coord_set(mask)
+    if not len(ys):
+        return {}
+    two_cy, two_cx = round(2 * ys.mean()), round(2 * xs.mean())
+    found = {}
+    tests = {
+        "rot180": (two_cy - ys, two_cx - xs),
+        "mirror_x": (ys, two_cx - xs),          # mirrored left-right
+        "mirror_y": (two_cy - ys, xs),          # mirrored top-bottom
+    }
+    for name, (ys2, xs2) in tests.items():
+        iou = _iou_of_map(ys, xs, mask, ys2, xs2)
+        if iou >= min_iou:
+            found[name] = {"centre": [two_cx / 2.0, two_cy / 2.0],
+                           "iou": round(iou, 4)}
+    return found
+
+
+def edge_directions(segments, tol_deg: float = 0.8) -> list[dict]:
+    """Distinct straight-edge directions, largest family first."""
+    lines = [s for s in segments if s["kind"] == "line"]
+    fams: list[dict] = []
+    for s in lines:
+        (x0, y0), (x1, y1) = s["p0"], s["p1"]
+        ang = math.degrees(math.atan2(y1 - y0, x1 - x0)) % 180.0
+        length = math.hypot(x1 - x0, y1 - y0)
+        for f in fams:
+            d = abs(f["angle_deg"] - ang)
+            if min(d, 180.0 - d) <= tol_deg:
+                f["members"].append((s, ang, length))
+                f["angle_deg"] = sum(a for _, a, _ in f["members"]) / len(f["members"])
+                break
+        else:
+            fams.append({"angle_deg": ang, "members": [(s, ang, length)]})
+    out = []
+    for f in sorted(fams, key=lambda f: -len(f["members"])):
+        out.append({"angle_deg": round(f["angle_deg"], 4),
+                    "count": len(f["members"]),
+                    "total_length": round(sum(L for _, _, L in f["members"]), 1)})
+    return out, fams
+
+
+def _all_gaps(fams, min_gap: float = 4.0) -> list[tuple[float, float]]:
+    """Every gap between parallel edges, as (gap, direction_deg).
+
+    Candidate translations are drawn from these rather than only from the
+    *repeated* gaps: a two-copy overlap often shows just two parallel edges per
+    family, which yields one gap and therefore no "repeat". The
+    self-similarity test downstream is the real filter, so a wrong candidate
+    costs nothing but a cheap array compare.
+    """
+    gaps = []
+    for f in fams:
+        if len(f["members"]) < 2:
+            continue
+        ang = math.radians(f["angle_deg"])
+        n = np.array([-math.sin(ang), math.cos(ang)])
+        offs = sorted(float(np.array(s["p0"]) @ n) for s, _, _ in f["members"])
+        for i in range(len(offs)):
+            for j in range(i + 1, len(offs)):
+                g = offs[j] - offs[i]
+                if g >= min_gap:
+                    gaps.append((g, f["angle_deg"]))
+    return gaps
+
+
+def repeated_spacings(fams, tol: float = 1.5, min_gap: float = 4.0) -> list[dict]:
+    """Gaps between parallel edges that occur more than once.
+
+    Separate shapes do not line up by accident: a spacing that repeats is the
+    fingerprint of one primitive placed more than once.
+    """
+    gaps = _all_gaps(fams, min_gap)
+    clusters: list[dict] = []
+    for g, ang in sorted(gaps):
+        for c in clusters:
+            if abs(c["value"] - g) <= tol:
+                c["_vals"].append(g)
+                c["value"] = sum(c["_vals"]) / len(c["_vals"])
+                c["directions_deg"].append(round(ang, 3))
+                break
+        else:
+            clusters.append({"value": g, "_vals": [g],
+                             "directions_deg": [round(ang, 3)]})
+    out = []
+    for c in clusters:
+        if len(c["_vals"]) >= 2:
+            out.append({"value": round(c["value"], 3),
+                        "occurrences": len(c["_vals"]),
+                        "directions_deg": sorted(set(c["directions_deg"]))})
+    return sorted(out, key=lambda c: -c["occurrences"])
+
+
+def crossing_corners(segments, ratio: float = 0.35) -> list[dict]:
+    """Corners far tighter than the shape's usual radius.
+
+    A designed fillet repeats; a corner that is merely where two shapes cross
+    does not. These are the corners you must NOT try to reproduce as fillets.
+    """
+    radii = [s["arc_radius"] for s in segments
+             if s["kind"] == "corner" and s.get("arc_radius")]
+    if len(radii) < 3:
+        return []
+    typical = float(np.median(radii))
+    return [{"at": [round(v, 2) for v in s["p0"]],
+             "radius": round(s["arc_radius"], 2),
+             "typical_radius": round(typical, 2)}
+            for s in segments
+            if s["kind"] == "corner" and s.get("arc_radius")
+            and s["arc_radius"] < ratio * typical]
+
+
+def structure_hint(sym, dirs, spacings, crossings) -> str | None:
+    """One plain sentence, or nothing.
+
+    Deliberately built only from signals that do not depend on shape size:
+    a spacing that repeats, an exact symmetry, a corner radius that disagrees
+    with its siblings. An earlier version also tried candidate translations
+    and reported how much of the shape each one covered -- that was cut,
+    because a SMALL shift overlaps heavily for any shape at all, so the true
+    offset consistently scored below spurious ones. A repeated spacing carries
+    the same information without the size dependence.
+    """
+    bits = []
+    if spacings:
+        top = spacings[0]
+        bits.append(f"the gap {top['value']:.1f} between parallel edges occurs "
+                    f"{top['occurrences']} times"
+                    + (f" (and {len(spacings) - 1} other spacing(s) repeat too)"
+                       if len(spacings) > 1 else "")
+                    + ", so some geometry here is repeated")
+    if "rot180" in sym:
+        c = sym["rot180"]["centre"]
+        bits.append(f"symmetric under 180-degree rotation about "
+                    f"({c[0]:.1f}, {c[1]:.1f})")
+    for k, label in (("mirror_x", "left-right"), ("mirror_y", "top-bottom")):
+        if k in sym:
+            bits.append(f"mirror-symmetric {label} about "
+                        f"({sym[k]['centre'][0]:.1f}, {sym[k]['centre'][1]:.1f})")
+    if crossings:
+        bits.append(f"{len(crossings)} corner(s) far tighter than the usual "
+                    f"radius, so probably shape crossings rather than fillets")
+    if not bits:
+        return None
+    tail = (". Repeated spacings or crossing corners mean this is probably "
+            "built from OVERLAPPING PRIMITIVES -- fit them (SKILL.md 3b) "
+            "rather than tracing the outline."
+            if (spacings or crossings) else
+            ". Use the symmetry to remove parameters from whatever you fit.")
+    return "; ".join(bits) + tail
+
+
+def detect_structure(mask: np.ndarray, segments: list[dict]) -> dict:
+    sym = detect_symmetry(mask)
+    dirs, fams = edge_directions(segments)
+    spacings = repeated_spacings(fams)
+    crossings = crossing_corners(segments)
+    return {
+        "symmetry": sym,
+        "edge_directions": dirs,
+        "repeated_spacings": spacings,
+        "crossing_corners": crossings,
+        "hint": structure_hint(sym, dirs, spacings, crossings),
+    }

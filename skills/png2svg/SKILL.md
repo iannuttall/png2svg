@@ -69,11 +69,23 @@ fitted params and errors), and a paint probe per component —
 - `angular` — conic sweep, centre given
 - `complex` — layered or occluded paint; your judgment needed
 
+Each component also carries a `structure` block, and `analyse` prints its
+`hint` line if it found anything: repeated spacings between parallel edges,
+exact 180°/mirror symmetry with its centre, and corners far tighter than the
+shape's usual radius. **Read that line first** — it is the fastest available
+answer to the route question in §2, and every number in it is one you would
+otherwise derive by hand. A repeated spacing or a tight corner means
+overlapping primitives; a symmetry centre means parameters you can delete
+rather than fit.
+
+It reports only what it measured. Silence means nothing was found, not that
+the mark is simple.
+
 **Treat every coordinate in features.json as a ±0.5px proposal**, and read
 `overlay.png` next to the source before deciding anything. `analyse` is
 fooled by watermarks and compression artefacts.
 
-## 2. Decompose
+## 2. Decompose — and pick your route
 
 Decide the structure before measuring anything: how many overlapping
 primitives, what occludes what, where the paint seams are.
@@ -83,7 +95,33 @@ overlapping shapes — the seam is the top shape's edge, not a gradient stop,
 and it often passes through an arc centre. Getting this right is most of the
 work; everything downstream is arithmetic.
 
-## 3. Measure
+This decision also picks which of **two routes** you measure with. They are
+siblings, not a default and a fallback — reaching for the wrong one costs you
+either a pile of nodes or an afternoon:
+
+| what you are looking at | route | §  |
+|---|---|---|
+| one silhouette whose boundary **is** the design — a letterform, a swoosh, an organic blob | **trace it** | 3a |
+| overlapping filled primitives — bars, rects, discs, capsules — where the union's boundary is a *by-product* of where they landed | **fit the primitives** | 3b |
+
+`analyse`'s `structure` hint checks the first two of these for you. Three
+tells, any one of which is enough:
+
+- **A corner that is an intersection, not a fillet.** Walk the silhouette and
+  ask of each corner: did a designer round this, or did it appear because two
+  shapes crossed? Sharp spikes and tiny radii next to generous ones mean
+  crossings.
+- **Coincidences at a distance.** Two edges collinear but far apart; a spacing
+  that repeats; 180°/mirror symmetry across the whole mark. Separate shapes
+  do not accidentally line up — that is one primitive, duplicated.
+- **A colour region that is exactly an overlap.** Three bands where the middle
+  one is the intersection of the outer two.
+
+Tracing in the second case is not merely bigger, it throws the structure
+away: the constraints that made the artwork regular are exactly what a
+contour fit cannot see.
+
+## 3a. Measure by tracing
 
 Copy `scripts/measure_template.py` next to your work and edit the marked
 sections — it carries the whole pipeline and writes `project.json` directly.
@@ -91,7 +129,7 @@ sections — it carries the whole pipeline and writes `project.json` directly.
 hand measurement dominates and you want `analysis/measurements.json` as a
 separate artefact.)
 
-**Start with the automatic path.** For each region you decided on above:
+For each region you decided on above:
 
 ```python
 C = subpixel_contour(field, region)            # ordered subpixel boundary
@@ -111,19 +149,55 @@ more segments than the artwork plausibly has, the tolerance is chasing
 noise. On a textured source, set it near the texture scale — fitting tighter
 than the grain fits the grain.
 
-**Then measure by hand what the automatic path cannot know.** A tangency, a
-shared centre, a radius that is exactly a half-width: these are design
-decisions no fitter can infer, and each one you confirm removes a free
-parameter that was absorbing noise. This is where the reconstruction goes
-from good to exact.
+## 3b. Measure by fitting primitives
+
+Declare the decomposition as a function of a parameter vector and solve for
+the parameters against every contour point at once:
+
+```python
+def build(p):                                  # -> [(vertices, radius), ...]
+    ang, cx, cy, a, b, g, k, r = p
+    ...                                        # your construction, in code
+    return [(rect_1, r), (rect_2, r), (rect_3, r)]
+
+fit = primitives.fit_union(contour, build, p0)  # signed distance -> zero
+print(fit.summary())                            # mean/rms/p95/max, in pixels
+d = geom.rounded_polygon(vertices, radius)      # emit the same shape as a path
+```
+
+The residual is a real distance in pixels, so it reads straight against the
+edge targets in section 5. Build the model path with `geom.rounded_polygon` from the
+*same* vertices you fitted, so the fit and the model cannot drift apart.
+
+**Let the symmetry remove parameters.** This is where the route pays. On one
+mark, three rounded parallelograms with 180° symmetry came to **eight**
+numbers — and the offset between primitives and each one's width were
+*consequences* of the symmetry rather than things to fit. Eight numbers, mean
+residual 0.08px, against ~40 nodes for the traced equivalent. Every parameter
+you can derive instead of fit is one that was absorbing noise.
+
+Use `fit_union(..., trim=0.05)` when the union has sharp spikes: rasterising a
+narrow tip rounds it, so those points sit ~1px inside the model through no
+fault of the parameters. Check `fit.worst()` before believing a trim — trimmed
+points anywhere other than a tip mean the decomposition is wrong, not the data.
+
+## 3c. Then measure by hand what no fitter can know
+
+A tangency, a shared centre, a radius that is exactly a half-width: these are
+design decisions, and each one you confirm removes a free parameter. This is
+where the reconstruction goes from good to exact.
 
 | | |
 |---|---|
-| `segment_outline` + `snap_outline` + `to_segments` | any outline, first pass |
+| `segment_outline` + `snap_outline` + `to_segments` | trace an outline (3a) |
+| `primitives.fit_union` | fit overlapping rounded primitives as one system (3b) |
+| `geom.rounded_polygon`, `geom.smooth_polygon` | emit a filleted / squircled polygon as path segments |
+| `primitives.raster`, `primitives.ink_bounds` | masks for paint fitting; exact crop box |
 | `edge_samples` + `fit_line` + `intersect` | straight edges → exact vertices |
 | `fit_circle`, `fit_corner_full` | arcs and squircle corners |
 | `curves.fit_bezier_chain` | free-form runs with no straight structure |
 | `paint.fit_linear_gradient`, `paint.flat_colour` | recover the paint |
+| `paint.fit_shared_ramp` | one ramp shared by duplicated shapes |
 
 **Read [references/conventions.md](references/conventions.md) before writing
 any hand measurement.** The two that cost the most hours:
@@ -138,7 +212,7 @@ Constrain before you fit: a round cap between parallel sides has radius
 *exactly* the half-width, and a bowl meeting a flat edge is tangent to it.
 When a constrained fit beats the free one, the constraint was the designer's.
 
-## 3a. Paint
+## 3d. Paint
 
 ```python
 fit_linear_gradient(rgb, region, trim=0.12)   # axis, stop positions, colours

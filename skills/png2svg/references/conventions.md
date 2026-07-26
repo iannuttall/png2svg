@@ -39,20 +39,52 @@ uses an adaptive per-pixel 50%-coverage contour for reference and render
 alike. Edge metrics additionally run on closed + hole-filled masks, because a
 strong internal colour seam otherwise reads as a spurious boundary.
 
-## 3. Corners are squircle cubics, not arcs
+## 3. Corners: three candidates, and how to tell them apart
 
-Design tools smooth corners with cubic Béziers whose tangent lengths and
-handle lengths are independent, not with circular arcs. The signature: the
-flat run ends earlier than a circular fit predicts, yet mid-corner curvature
-behaves like a *larger* radius.
+Do not assume which kind you have. There are three, they look alike at a
+glance, and each of the first two has been the right answer on real artwork:
 
-Fit the cubic. `fit_corner_full(vertex, u_in, u_out, samples)` solves tangent
-lengths and handle lengths together; `fit_corner_cubic` fits handles when you
-already know the tangent points.
+1. **Squircle cubics.** Design tools with corner *smoothing* on use cubic
+   Béziers whose tangent lengths and handle lengths are independent. The
+   signature: the flat run ends earlier than a circular fit predicts, yet
+   mid-corner curvature behaves like a *larger* radius.
+2. **Circular arcs in final space.** A plain corner radius, tangent to both
+   edges, same radius at every corner of the shape. This is the default in
+   most tools, and on a parallelogram it produces a *different apparent
+   radius* at the sharp corners than at the shallow ones if you fit circles
+   without accounting for the corner angle.
+3. **Elliptical arcs**, when a rounded rectangle was drawn and then sheared or
+   scaled non-uniformly — the shear turns each circular fillet into an arc of
+   one common ellipse.
 
-Keep flank samples inside the corner zone. Samples out on the straight sides
-blow the fit up (a tangent length of 71px with 1.2px error is the tell), and
-scans that are too short to reach the boundary silently return nothing.
+**The discriminator between 2 and 3 is to un-shear and refit.** Take the
+contour, apply the inverse of the shear that makes the slanted edges vertical,
+and fit circles at the (now 90°) corners. If it is case 3 you get one radius
+across every corner; if it is case 2 you get nonsense. On the swipe-s mark the
+un-sheared fit gave 0.96–1.14px residuals with two disagreeing radii (7 and
+38), while circular-in-final-space gave 0.19–0.34px with one radius. Rejected
+in ten minutes, and it would have been an afternoon of wrong geometry
+otherwise.
+
+Fit the cubic with `fit_corner_full(vertex, u_in, u_out, samples)`, which
+solves tangent lengths and handle lengths together; `fit_corner_cubic` fits
+handles when you already know the tangent points.
+
+**Size the sample window from the radius, and never use one window for two
+corner angles.** A shallow corner's whole fillet sits within ~0.5r of the
+vertex; a sharp one's sits 1.3r–2.1r away. One fixed window reports garbage
+for the other — a 55px window returned a 73px radius for a 17px fillet, and
+identical tangent lengths for eight corners of different sizes. Guess r, set
+the window to ~1.1x the tangent length, refit, repeat. Nothing in the output
+flags a bad window; only an absurd radius does.
+
+Samples out on the straight sides blow the fit up (a tangent length of 71px
+with 1.2px error is the tell), and scans too short to reach the boundary
+silently return nothing.
+
+**Shallow corners cannot arbitrate a shared radius** — their fillets are too
+flat, so a free fit is worth about ±2px. Let the sharp corners set the radius
+and check the shallow ones against it, not the other way round.
 
 ## 4. Constrain tangency
 
@@ -103,6 +135,28 @@ have candidate stops, refit the stop *positions* against all interior pixels
 with the colours fixed; offsets that land on 0.5 or 0/1 are the designer's,
 not a coincidence.
 
+### A duplicated shape carries its gradient with it
+
+If a shape was copied, each copy has the **same ramp in its own local span** —
+not one ramp spanning both, and not two unrelated ramps. Fitting a single
+gradient across the pair is the mistake that is easy to make and hard to read
+afterwards: `fit_linear_gradient` returns non-monotonic stops, sometimes with
+a stop borrowed from a neighbouring colour entirely, and the rms only looks
+mildly bad.
+
+**The tell is a colour discontinuity where two copies meet** — one ends
+saturated exactly where its neighbour restarts light. No single gradient can
+do that.
+
+Fit them together with `paint.fit_shared_ramp`, passing each copy's own mask
+and its own axis bounds. Pooling matters because each copy usually exposes
+only *part* of its ramp, so a per-copy fit extrapolates from a narrow window
+and the copies disagree about the end stops.
+
+Pass each **individual shape's** mask, not the whole region's mask twice with
+different bounds — the latter sends every pixel through both spans and the
+ramp collapses (rms 13.4 against 1.7).
+
 ## 7. Counters: winding or fill-rule
 
 A second subpath cuts a hole either by running the **opposite way round**
@@ -138,6 +192,23 @@ Where a frame is provably regular (a hexagon pair, a shared centre), fit it
 as **one** constrained system from all its edge samples at once rather than
 edge by edge — the constraint is linear in (centre, apothem) when the edge
 normals are known.
+
+### A symmetry deletes parameters rather than constraining them
+
+Write the construction down as a function of a parameter vector, and
+quantities you were about to measure stop being parameters at all. On a mark
+of three rounded parallelograms with 180° symmetry, the offset between them
+and each one's width both fell out of the symmetry: eight numbers fixed the
+whole silhouette to a mean residual of 0.080px. See
+[examples.md](examples.md) for the construction.
+
+Use `primitives.fit_union` for this rather than rolling your own solve — it
+takes the contour and a `build(p)` returning `(vertices, radius)` pairs, and
+minimises signed distance in pixels, directly comparable to the edge targets.
+
+**Measure the redundant quantity anyway, before you derive it.** Two
+independent estimates of that offset agreeing to 0.02px is what proved the
+decomposition. Deriving it from the start would have hidden a wrong guess.
 
 ## 9. A constraint is a hypothesis — verify it
 
@@ -225,7 +296,11 @@ Before rebuilding: if the measured residuals are a fifth of a pixel and the
 score says otherwise, suspect the instrument. `foreground_mask` has a known
 weak spot too — it normalises coverage by the local maximum, so a light
 region adjacent to a much darker one can fall below the threshold and
-produce a spurious internal boundary.
+produce a spurious internal boundary. That spot is worth recognising by its
+signature: where an internal colour seam meets the outer edge, the traced
+contour wobbles and `residuals` reports a 2–3px `edge_missing_reference`
+cluster a dozen pixels long, right at the junction. It is the mask, not the
+model.
 
 ## Noise floors — know when to stop
 
@@ -247,6 +322,12 @@ produce a spurious internal boundary.
   rows along a seam is that floor, not a model error. Judge by p95.
 - **Edge quantisation**: `edge_dist_p95` reads 1.0 unless more than 95% of
   boundary pixels land exactly. A p95 of 1.0 with a mean of 0.1 is converged.
-- **Sharp spikes**: tips a few pixels wide always disagree by one pixel.
+- **Sharp spikes**: tips a few pixels wide always disagree by one pixel. Where
+  two primitives cross at a shallow angle the union has a genuine spike, and
+  rasterising rounds it: expect the contour to read **1.2–1.5px inside** the
+  model for the handful of points at the tip. Leave it sharp — it is sharp in
+  the artwork. Absorb it with `fit_union(..., trim=0.05)` so it does not bend
+  every parameter, and confirm via `fit.worst()` that the trimmed points really
+  are at tips.
 - **Watermarks and artefacts**: reconstruct clean and let ΔE carry the
   difference. Say so in the model notes so the next reader isn't confused.

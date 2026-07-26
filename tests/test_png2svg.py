@@ -6,6 +6,7 @@ import pytest
 from PIL import Image
 
 from png2svg import compare as cmp
+from png2svg import primitives as prim
 from png2svg.geom import rounded_polygon, smooth_polygon
 from png2svg.model import ModelError, Project, validate_shape
 from png2svg.render import render_svg
@@ -641,3 +642,261 @@ class TestFillRule:
     def test_rejects_an_unknown_rule(self):
         with pytest.raises(ModelError, match="fill_rule"):
             validate_shape(self.donut("winding"))
+
+
+class TestPrimitives:
+    """Ground truth: synthesise a union whose parameters are known, take its
+    boundary the way `measure` would, and check the fit recovers the numbers.
+
+    The apparatus is the risk here, not the fitter (conventions.md 12), so the
+    sampling test comes first: it asserts the SDF is zero on an analytically
+    known boundary, with no rasterisation in the loop.
+    """
+
+    @staticmethod
+    def sheared_rect(xl, xr, ytop, ybot, s, cy):
+        """Parallelogram with horizontal top/bottom, clockwise from top-left.
+        xl/xr are the slant lines' x at y = cy."""
+        return [(xl + (ytop - cy) * s, ytop), (xr + (ytop - cy) * s, ytop),
+                (xr + (ybot - cy) * s, ybot), (xl + (ybot - cy) * s, ybot)]
+
+    def test_sdf_is_zero_on_an_analytic_boundary(self):
+        # a rounded square, boundary written down in closed form: flats and
+        # arcs both, so no rasterisation anywhere in this assertion
+        r = 6.0
+        verts = [(20, 20), (80, 20), (80, 80), (20, 80)]
+        pts = [(26 + t * 48, 20.0) for t in np.linspace(0, 1, 40)]
+        pts += [(74 + r * np.sin(a), 26 - r * np.cos(a))
+                for a in np.linspace(0, np.pi / 2, 40)]
+        pts += [(20.0, 26 + t * 48) for t in np.linspace(0, 1, 40)]
+        d = prim.rounded_convex_sdf(np.array(pts), verts, r)
+        assert np.abs(d).max() < 1e-9, np.abs(d).max()
+
+    def test_sdf_sign_is_inside_negative(self):
+        verts = [(10, 10), (60, 10), (60, 40), (10, 40)]     # clockwise, y down
+        ccw = verts[::-1]
+        for v in (verts, ccw):                               # winding must not matter
+            d = prim.rounded_convex_sdf(np.array([[35.0, 25.0], [35.0, 5.0]]), v, 4.0)
+            assert d[0] < 0 and d[1] > 0, (v, d)
+            assert abs(d[0] + 15.0) < 1e-9                   # 15px from the top edge
+
+    def test_erode_gives_the_fillet_centres(self):
+        core = prim.erode_convex([(0, 0), (40, 0), (40, 30), (0, 30)], 5.0)
+        assert np.allclose(np.sort(core, axis=0),
+                           np.sort([[5, 5], [35, 5], [35, 25], [5, 25]], axis=0))
+
+    def test_radius_too_large_is_rejected_not_silently_wrong(self):
+        square = [(0, 0), (10, 0), (10, 10), (0, 10)]
+        prim.erode_convex(square, 4.0)                       # fits
+        with pytest.raises(prim.PrimitiveError, match="too large"):
+            prim.erode_convex(square, 6.0)                   # inside out
+
+    def test_collinear_edges_are_rejected(self):
+        with pytest.raises(prim.PrimitiveError, match="parallel"):
+            prim.erode_convex([(0, 0), (10, 0), (20, 0), (10, 10)], 3.0)
+
+    def test_union_recovers_eight_known_parameters(self):
+        # three parallelograms, 180-degree symmetric: the arrangement the
+        # swipe-s mark turned out to be. width and offset are consequences.
+        truth = np.array([128.4, 60.0, 50.0, 30.0, 16.0, 25.0, 6.0, 1.7])
+
+        def build(p):
+            ang, cx, cy, a, b, g, k, r = p
+            s = np.cos(np.radians(ang)) / np.sin(np.radians(ang))
+            rects = [(cx - a, cx - a + 2 * b, cy - g, cy + k),
+                     (cx - b, cx + b, cy - g, cy + g),
+                     (cx + a - 2 * b, cx + a, cy - k, cy + g)]
+            return [(self.sheared_rect(xl, xr, yt, yb, s, cy), r)
+                    for xl, xr, yt, yb in rects]
+
+        # sample the true boundary by marching a fine grid and keeping the
+        # near-zero crossings -- independent of the fitter's own machinery
+        ys, xs = np.mgrid[0:100:0.25, 0:120:0.25]
+        P = np.stack([xs.ravel(), ys.ravel()], 1)
+        d = prim.union_sdf(P, build(truth))
+        contour = P[np.abs(d) < 0.02]
+        assert len(contour) > 500
+
+        start = truth + np.array([0.9, -2.0, 1.5, 3.0, -2.0, 2.5, 1.0, 1.2])
+        fit = prim.fit_union(contour, build, start)
+        assert fit.mean < 0.01, fit.summary()
+        assert np.allclose(fit.params, truth, atol=0.02), fit.params
+
+    def test_trim_survives_a_rounded_spike(self):
+        """A sharp union tip rasterises rounded; trim must absorb it rather
+        than let it bend every parameter."""
+        truth = np.array([40.0, 40.0, 20.0, 5.0])
+
+        def build(p):
+            x0, y0, size, r = p
+            return [([(x0, y0), (x0 + size, y0), (x0 + size, y0 + size),
+                      (x0, y0 + size)], r)]
+
+        ys, xs = np.mgrid[0:100:0.25, 0:100:0.25]
+        P = np.stack([xs.ravel(), ys.ravel()], 1)
+        contour = P[np.abs(prim.union_sdf(P, build(truth))) < 0.02]
+        # 3% of points pulled 1.5px inward, as a rounded tip would read
+        spoilt = contour.copy()
+        spoilt[::33] += 1.5
+        clean = prim.fit_union(spoilt, build, truth + 2.0)
+        trimmed = prim.fit_union(spoilt, build, truth + 2.0, trim=0.06, passes=3)
+        assert np.abs(trimmed.params - truth).max() < np.abs(clean.params - truth).max()
+        assert np.allclose(trimmed.params, truth, atol=0.05), trimmed.params
+
+    def test_raster_and_ink_bounds_agree_with_the_geometry(self):
+        shapes = [([(10, 10), (60, 10), (60, 40), (10, 40)], 4.0)]
+        m = prim.raster(shapes, 80, 60)
+        assert m[25, 35] and not m[5, 35] and not m[25, 70]
+        # the corner pixel is outside the r=4 fillet (centre (14,14): pixel
+        # centre (10.5,10.5) is 4.95px away), its neighbour is inside (3.54px)
+        assert not m[10, 10] and m[11, 11]
+        # exact, not sampled: the bbox of a rounded convex polygon is its
+        # core's bbox grown by r, so these are equalities not tolerances
+        assert np.allclose(prim.ink_bounds(shapes), (10.0, 10.0, 60.0, 40.0))
+
+    def test_ink_bounds_catches_an_extreme_point_mid_arc(self):
+        # a slanted parallelogram's leftmost point is on the bottom-left
+        # fillet, not at any vertex -- the case that tempts you to sample
+        verts = [(40, 0), (90, 0), (60, 40), (10, 40)]
+        r = 8.0
+        x0, y0, x1, y1 = prim.ink_bounds([(verts, r)])
+        core = prim.erode_convex(verts, r)
+        assert abs(x0 - (core[:, 0].min() - r)) < 1e-12
+        assert np.allclose((y0, y1), (0.0, 40.0))   # flats: tangent to top/bottom
+        # and nothing in the union pokes outside the reported box
+        ys, xs = np.mgrid[-20:60:0.5, -20:110:0.5]
+        P = np.stack([xs.ravel(), ys.ravel()], 1)
+        hit = P[prim.union_sdf(P, [(verts, r)]) <= 0]
+        assert hit[:, 0].min() >= x0 - 1e-9 and hit[:, 0].max() <= x1 + 1e-9
+        assert hit[:, 1].min() >= y0 - 1e-9 and hit[:, 1].max() <= y1 + 1e-9
+
+    def test_deterministic(self):
+        shapes = [([(5, 5), (50, 5), (50, 45), (5, 45)], 7.0)]
+        P = np.array([[10.0, 12.0], [30.0, 25.0], [49.0, 44.0]])
+        a = prim.union_sdf(P, shapes)
+        b = prim.union_sdf(P, shapes)
+        assert a.tobytes() == b.tobytes()
+
+
+class TestSharedRamp:
+    def test_recovers_one_ramp_from_two_partly_hidden_copies(self):
+        """Two copies of a shape, each exposing a different slice of the same
+        ramp. Neither slice alone pins the end stops; together they must."""
+        from png2svg.paint import fit_shared_ramp
+        c0, c1 = np.array([250.0, 120.0, 220.0]), np.array([250.0, 40.0, 250.0])
+        img = np.zeros((200, 60, 3), np.uint8)
+        m_a = np.zeros((200, 60), bool)
+        m_b = np.zeros((200, 60), bool)
+        # copy A spans y 0..100 but only y 10..55 is visible;
+        # copy B spans y 100..200 but only y 150..190 is visible
+        for y in range(200):
+            for span, lo, hi, m in ((( 0, 100), 10,  55, m_a),
+                                    ((100, 200), 150, 190, m_b)):
+                t0, t1 = span
+                if lo <= y < hi:
+                    u = (y + 0.5 - t0) / (t1 - t0)
+                    img[y, 12:48] = np.round(c0 + (c1 - c0) * u)
+                    m[y, 12:48] = True
+        out = fit_shared_ramp(img, [(m_a, 0, 100), (m_b, 100, 200)], erode=3)
+        assert out["rms"] < 1.0, out
+        assert out["stops"][0]["color"] == "#fa78dc", out["stops"]
+        assert out["stops"][1]["color"] == "#fa28fa", out["stops"]
+
+    def test_raises_rather_than_returning_junk_when_nothing_survives(self):
+        from png2svg.paint import fit_shared_ramp
+        img = np.zeros((20, 20, 3), np.uint8)
+        with pytest.raises(ValueError, match="erode"):
+            fit_shared_ramp(img, [(np.zeros((20, 20), bool), 0, 20)])
+
+
+class TestStructureDetection:
+    """`analyse` should say "this is one shape repeated" when it is, and stay
+    quiet when it is not. A false positive here sends the agent down the wrong
+    route, so the negative cases matter more than the positive one."""
+
+    @staticmethod
+    def render(shapes, w=260, h=200):
+        proj = make_project(shapes, w, h)
+        return render_svg(generate_svg(proj), w, h)
+
+    @staticmethod
+    def rect_path(x, y, w, h, r=8.0):
+        from png2svg.geom import rounded_polygon
+        return rounded_polygon([(x, y), (x + w, y), (x + w, y + h), (x, y + h)], r)
+
+    def analyse(self, img):
+        from png2svg.analyse import analyse_image
+        feats, _ = analyse_image(img, (255, 255, 255, 255))
+        return feats["components"][0]["structure"]
+
+    def test_finds_the_offset_of_three_repeated_bars(self):
+        # staggered, so the union actually has structure -- three bars at the
+        # same y would just merge into one rectangle and there'd be nothing
+        # for any detector to find
+        d = []
+        for i in range(3):                     # at a size the tracer resolves
+            d += self.rect_path(40 + 80 * i, 60 + 60 * i, 140, 160, 16.0)
+        st = self.analyse(self.render([
+            {"id": "s", "type": "path", "d": d,
+             "fills": [{"type": "solid", "color": "#204080"}]}], 520, 400))
+        assert st["repeated_spacings"], st
+        assert st["hint"] and "OVERLAPPING PRIMITIVES" in st["hint"], st["hint"]
+
+    def test_flags_an_L_shape_as_overlapping_primitives(self):
+        # an L IS two overlapping rects, so routing it to 3b is correct
+        d = self.rect_path(40, 30, 60, 140) + self.rect_path(40, 110, 170, 60)
+        st = self.analyse(self.render([
+            {"id": "s", "type": "path", "d": d,
+             "fills": [{"type": "solid", "color": "#204080"}]}]))
+        assert st["repeated_spacings"], st
+        assert "OVERLAPPING PRIMITIVES" in (st["hint"] or ""), st["hint"]
+
+    def test_quiet_on_a_single_rounded_rect(self):
+        st = self.analyse(self.render([
+            {"id": "s", "type": "path", "d": self.rect_path(40, 40, 170, 110),
+             "fills": [{"type": "solid", "color": "#204080"}]}]))
+        # a lone rect IS symmetric, and saying so is true and harmless -- but
+        # it must not claim the shape is a repeat of something
+        assert not st["repeated_spacings"], st["repeated_spacings"]
+        assert not st["crossing_corners"], st["crossing_corners"]
+        assert "OVERLAPPING PRIMITIVES" not in (st["hint"] or ""), st["hint"]
+
+    def test_quiet_on_a_single_blob(self):
+        # a lone ellipse: no straight edges to space out, nothing to repeat.
+        # This is the case that must NOT be sent to the primitives route.
+        st = self.analyse(self.render([
+            {"id": "s", "type": "path",
+             "d": [["M", 40, 100], ["A", 90, 60, 0, 1, 1, 220, 100],
+                   ["A", 90, 60, 0, 1, 1, 40, 100], ["Z"]],
+             "fills": [{"type": "solid", "color": "#204080"}]}]))
+        assert not st["repeated_spacings"], st["repeated_spacings"]
+        assert not st["crossing_corners"], st["crossing_corners"]
+        assert "OVERLAPPING PRIMITIVES" not in (st["hint"] or ""), st["hint"]
+
+    def test_reports_symmetry_and_edge_directions(self):
+        st = self.analyse(self.render([
+            {"id": "s", "type": "path", "d": self.rect_path(40, 40, 170, 110),
+             "fills": [{"type": "solid", "color": "#204080"}]}]))
+        assert "rot180" in st["symmetry"] and st["symmetry"]["rot180"]["iou"] > 0.99
+        angles = sorted(round(d["angle_deg"]) for d in st["edge_directions"])
+        assert angles == [0, 90], st["edge_directions"]
+
+    def test_flags_corners_far_tighter_than_the_usual_radius(self):
+        from png2svg.analyse import crossing_corners
+        seg = lambda r, x: {"kind": "corner", "p0": [x, 10.0], "p1": [x, 12.0],
+                            "arc_radius": r}
+        # five designed 17px fillets and two 2.5px crossings
+        got = crossing_corners([seg(17.0, 1), seg(17.4, 2), seg(16.9, 3),
+                                seg(17.1, 4), seg(17.2, 5),
+                                seg(2.5, 6), seg(2.4, 7)])
+        assert [c["radius"] for c in got] == [2.5, 2.4], got
+        assert all(c["typical_radius"] == 17.0 for c in got), got
+        # and it stays silent when every corner agrees
+        assert crossing_corners([seg(17.0, 1), seg(17.2, 2), seg(16.8, 3)]) == []
+
+    def test_deterministic(self):
+        img = self.render([{"id": "s", "type": "path",
+                            "d": self.rect_path(40, 40, 170, 110),
+                            "fills": [{"type": "solid", "color": "#204080"}]}])
+        import json as _json
+        assert _json.dumps(self.analyse(img)) == _json.dumps(self.analyse(img))

@@ -125,6 +125,9 @@ def analyse(project: Path = typer.Argument(..., exists=True, file_okay=False)) -
             f"{kinds.count('line')}L/{kinds.count('arc')}A/{kinds.count('curve')}C "
             f"corners={c['n_corners']}"
         )
+        hint = c.get("structure", {}).get("hint")
+        if hint:
+            typer.echo(f"  structure: {hint}")
     typer.echo(f"wrote {out / 'features.json'} and overlay.png")
 
 

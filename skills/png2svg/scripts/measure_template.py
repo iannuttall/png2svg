@@ -63,7 +63,9 @@ def _find_skill() -> Path:
 
 sys.path.insert(0, str(_find_skill() / "scripts"))
 
+from png2svg import primitives as prim                           # noqa: E402
 from png2svg.compare import foreground_mask                      # noqa: E402
+from png2svg.geom import rounded_polygon, smooth_polygon  # noqa: E402,F401
 from png2svg.measure import (                                    # noqa: E402
     Field, subpixel_contour,
     edge_samples, fit_line, intersect,        # noqa: F401  hand measurement
@@ -73,7 +75,9 @@ from png2svg.model import load_project, save_project             # noqa: E402
 from png2svg.outline import (                                    # noqa: E402
     segment_outline, snap_outline, summarise, to_segments,
 )
-from png2svg.paint import fit_linear_gradient, flat_colour       # noqa: E402
+from png2svg.paint import (                                      # noqa: E402
+    fit_linear_gradient, flat_colour, fit_shared_ramp,  # noqa: F401
+)
 
 # ==== EDIT: project =========================================================
 PROJECT = Path("work/name")
@@ -107,6 +111,26 @@ def path_of(region, label, tol=TOL, reverse=False):
     return to_segments(snapped)
 
 
+def fit_primitives(contour, build, p0, trim=0.0):
+    """THE OTHER ROUTE (SKILL.md 3b). Use this instead of `path_of` when the
+    artwork is overlapping filled primitives and the union's boundary is a
+    by-product -- bars, rects, discs, capsules, anything repeated.
+
+    `build(p)` returns [(vertices, radius), ...] as a function of the parameter
+    vector; emit each with `rounded_polygon(vertices, radius)`. Symmetries
+    delete parameters rather than merely constraining them: three rounded
+    parallelograms with 180-degree symmetry came to eight numbers at 0.080px.
+
+    Tells that you are here rather than in `path_of`: a corner that is an
+    intersection rather than a fillet, a spacing that repeats, an edge that is
+    an outer boundary in one place and an interior seam in another.
+    """
+    fit = prim.fit_union(contour, build, p0, trim=trim)
+    print(f"  primitives: {fit.summary()}")
+    print(f"      worst: {[f'{e:+.2f}' for _, e in fit.worst(3)]}")
+    return fit
+
+
 def paint_of(region, label, trim=0.0):
     """Gradient if the region varies along an axis, flat otherwise.
 
@@ -129,8 +153,14 @@ def paint_of(region, label, trim=0.0):
 # This is the reconstruction. Everything else is arithmetic.
 #
 #   - How many shapes, and what covers what? Shapes paint in list order.
+#   - WHICH ROUTE? `path_of` traces a boundary that IS the design (letterform,
+#     swoosh, blob). `fit_primitives` solves a construction of overlapping
+#     primitives whose union boundary is incidental. Picking wrong costs either
+#     a pile of nodes or an afternoon -- see SKILL.md section 2.
 #   - A hard colour boundary INSIDE one silhouette usually means two
 #     overlapping shapes, and the seam is the top shape's edge.
+#   - A duplicated shape carries its own gradient in its own local span; the
+#     tell is a colour JUMP where two copies meet. Use `fit_shared_ramp`.
 #   - Where one shape hides under another, GROW it into the occluder before
 #     tracing (intersect with the occluder itself, never a dilated copy) so
 #     no background hairline shows at the join.
