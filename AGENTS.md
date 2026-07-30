@@ -98,7 +98,8 @@ valuable precisely because it is a list of mistakes already paid for.
 
 ## Source artwork
 
-`work/` is gitignored: it holds other people's logos and large comparison
-renders, and everything in it is reproducible from the documented commands.
-Some `examples/` scripts and outputs are gitignored too, for artwork that is
-not ours to redistribute — see `.gitignore`. Check before adding artwork.
+`work/` is gitignored: it holds private test artwork, per-image scripts,
+generated SVGs and large comparison renders. Only Keep, IN and P Auto are
+published under `examples/`, with their approved source images in
+`examples/assets/`. Do not move any other artwork or reconstruction out of
+`work/` without confirming its redistribution rights.

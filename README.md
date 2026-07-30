@@ -1,166 +1,200 @@
 # png2svg
 
-Rebuild a geometric PNG — a logo, icon or monogram — as clean, editable,
-native SVG. Small paths and real gradients, no embedded raster, no path soup.
+Agent-guided PNG to SVG reconstruction for logos, icons and monograms.
 
-This is **reconstruction, not tracing**. Tools like vtracer and potrace fit
-contours to pixels. png2svg recovers the shapes a designer would have drawn:
-measure the source at subpixel precision, write a parametric model, render
-it, score it against the reference, and iterate until the numbers converge.
-The output of a good run is a handful of nodes, not a thousand.
+png2svg recovers the geometry and paint a designer would have used. It
+measures the raster at subpixel precision, builds a small parametric model,
+renders it and scores the result against the source. The finished SVG uses
+native paths and gradients with no embedded raster.
 
-On clean vector-style artwork: **IoU 0.998, edge error under 0.1px, 26–33
-path nodes, sub-kilobyte exports.** On textured 3D renders it reconstructs
-the structure and shading, drops the grain, and is scored accordingly.
+The project uses an agent-guided reconstruction workflow. It does not run as
+a one-shot converter. Shape decomposition, overlap and intentional design
+constraints still need visual judgment.
 
-| source | result | |
+| Included example | Result | Construction |
 |---|---|---|
-| plug "P" mark | IoU 0.9983, edge 0.092px, 33 nodes, 998 B | tangency and fillets |
-| "N" monogram | IoU 0.9976, edge 0.101px, 26 nodes, 775 B | watermark discarded |
-| gradient loop | IoU 0.9873, 108 nodes | counter, cap, shadow trimmed out of the paint |
-| ribbon + cylinder | IoU 0.9740, 85 nodes | occlusion in three pieces |
-| textured app icon | IoU 0.9264, low-freq ΔE 5.3 | structure kept, texture dropped |
+| Keep | IoU 0.9966, edge 0.146px, 57 nodes, 1,284 B | overlapping fitted primitives |
+| IN monogram | IoU 0.9976, edge 0.099px, 26 nodes, 710 B | measured polygons and clean watermark removal |
+| P Auto | IoU 0.9988, edge 0.067px, 33 nodes, 852 B | one contour with a real plug cutout |
 
-Scripts for each are in `examples/`; the reasoning behind them is in
-`skills/png2svg/references/examples.md`.
-
-## Install as a skill
+## Install the skill
 
 ```bash
 npx skills add iannuttall/png2svg
 ```
 
-That's the whole install. The skill bundles its own engine, and the scripts
-declare their dependencies inline — the first run builds a cached environment
-via `uv` and nothing is added to your project.
+The skill bundles its own measurement and SVG engine. Its scripts use `uv`
+to create a cached environment on first run, so nothing is installed into
+the project being worked on.
 
-Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+Requirements:
 
-Then just ask: *"vectorise this logo"*, pointing at a PNG or WebP.
+- Python 3.12 or newer
+- [uv](https://docs.astral.sh/uv/)
 
-## How it works
+Ask the agent to vectorise a logo and point it at a PNG or WebP file.
 
-An agent drives the loop; the library does the measuring and scoring.
-Neither half works alone — numbers cannot decide how a logo is built, and
-judgment cannot hit 0.05px by eye.
+## How reconstruction works
 
-**There is no single algorithm that reconstructs every logo.** Decomposition
-— how many shapes, what covers what, which coincidences are real design
-constraints — needs eyes on the image. What *is* deterministic is every
-measurement the agent asks for, and every reconstruction is reproducible
-byte-for-byte once written.
+The agent drives the visual decisions. The library makes each measurement,
+model and SVG reproducible.
 
-1. **Triage** — exact, "good enough", or decline?
-2. **Decompose** — shapes, occlusion, seams *(agent)*
-3. **Outline** — `subpixel_contour` → `segment_outline` → `snap_outline` →
-   `to_segments`, four calls per shape
-4. **Paint** — `fit_linear_gradient` / `flat_colour`
-5. **Constrain** — the tangencies and shared radii no fitter can infer *(agent)*
-6. **Check** — render, compare, read residual clusters, iterate
-7. **Validate and export**
+1. Inspect the source and decide whether it is suitable.
+2. Decompose the artwork into shapes, overlaps and paint regions.
+3. Trace a designed outline or fit the primitives that created it.
+4. Recover flat colours, gradients and shape-following ramps.
+5. Render the SVG and compare it with the source at 50% opacity.
+6. Read residual clusters, adjust the model and repeat.
+7. Validate every output profile and export the final SVG.
 
-Constraints are proposed and then **verified against the measured
-boundary**: `snap_outline` keeps the ones that fit better and reverts the
-rest, because a wrong constraint moves geometry by tens of pixels. On one
-mark it proposed 19 and rejected 8.
+There is no universal algorithm for deciding whether two meeting edges form
+a fillet, an overlap or a coincidence. That judgment is the point of the
+agent loop. Once the decomposition is chosen, the measurement and export
+paths are deterministic.
 
-The editable source of truth is `project.json`; SVG is generated from it
-byte-deterministically.
+## Run the included examples
 
-## Metrics
+Only Keep, IN and P Auto are published. Their source images are under
+`examples/assets/`; the [artwork notice](examples/assets/README.md) explains
+their separate licensing.
 
-- `silhouette_iou` — foreground-mask intersection over union
-- `edge_dist_mean/p95/max` — symmetric distance between mask boundaries (px)
-- `deltaE_mean/p95/max` — CIEDE2000 over interior pixels ≥2.5px from edges,
-  via linear-light RGB → Lab
-- `mae_linear_rgb` — mean absolute error in linear RGB
-- `texture_std` — how much the reference varies locally in its own interior:
-  ~1-2 for clean vector art, 10+ for a textured render
-- `deltaE_lowfreq_mean/p95` — CIEDE2000 after blurring both images, so the
-  score reflects structure and shading rather than grain
+### Keep
 
-When `texture_std` is high the source disagrees with **itself** by more than
-any vector can match, and per-pixel ΔE will report failure for a
-reconstruction that reads correctly. Judge those by the low-frequency
-figures.
+```bash
+uv run png2svg init examples/assets/keep.png --project work/keep
+uv run python examples/build_keep_model.py
+uv run png2svg check work/keep
+uv run png2svg export work/keep -o work/keep/generated/keep.svg
+```
 
-Masks use an adaptive ~50%-coverage contour (background distance normalised
-by local full-strength foreground), so dark and light shapes get unbiased
-boundaries. Edge metrics run on closed and hole-filled masks, because a
-strong internal colour seam otherwise reads as a spurious boundary.
+This example fits three disconnected groups as repeated rounded rectangles,
+clipped diagonal arms and a separate arrow. The soft shadow and low-level
+texture are deliberately left out.
 
-`check` renders at 4x and box-downsamples by default. resvg antialiases with
-four coverage levels per axis, so a rasterised edge snaps to the nearest
-quarter pixel — enough to flip a whole pixel row when a true edge sits near
-the mask threshold, and enough to make a correct model look broken. On the P
-mark, supersampling alone moved IoU 0.9938 → 0.9980 and edge mean 0.344 →
-0.114 with no change to the model. Pass `--supersample 1` to see raw
-renderer output.
+### IN monogram
+
+```bash
+uv run png2svg init examples/assets/in.webp --project work/n
+uv run python examples/measure_n.py
+uv run python examples/build_n_model.py
+uv run png2svg check work/n
+uv run png2svg export work/n -o work/n/generated/in.svg
+```
+
+This example measures straight edges and fitted corner cubics. A watermark
+in the source is treated as an artifact instead of being baked into the SVG.
+
+### P Auto
+
+```bash
+uv run png2svg init examples/assets/p-auto.png --project work/p
+uv run python examples/measure_p.py
+uv run python examples/build_p_model.py
+uv run png2svg check work/p
+uv run png2svg export work/p -o work/p/generated/p-auto.svg
+```
+
+The plug is negative space connected to the outside of the P. Keeping it in
+the same contour makes the cutout work over any background. The optional
+`examples/build_plug_icon.py` script writes standalone plug variants under
+`work/p/generated/`.
+
+Other artwork used during development stays in the ignored `work/`
+directory. Generated SVGs belong there too, which keeps private sources and
+build artifacts out of the repository.
+
+## What the checks measure
+
+- `silhouette_iou` measures overlap between the source and render masks.
+- `edge_dist_mean/p95/max` measures symmetric boundary distance in pixels.
+- `deltaE_mean/p95/max` measures CIEDE2000 over interior pixels.
+- `mae_linear_rgb` reports mean absolute error in linear RGB.
+- `texture_std` estimates local texture in the source.
+- `deltaE_lowfreq_mean/p95` scores structure and shading after removing grain.
+
+`check` renders at 4x and downsamples by default. This reduces the
+quarter-pixel edge quantisation of the SVG renderer. A correct edge near a
+mask threshold can otherwise flip a full pixel row and make the model look
+worse than it is.
+
+Each check writes a comparison folder containing the reference, render,
+50/50 overlay, edge map, colour difference and metrics. The overlay remains
+the main visual instrument.
+
+## Export profiles
+
+```bash
+uv run png2svg export work/name -o work/name/generated/final.svg
+uv run png2svg export work/name -o work/name/generated/semantic.svg --profile semantic
+uv run png2svg export work/name -o work/name/generated/animated.svg --profile animation
+uv run png2svg export work/name -o work/name/generated/cropped.svg --tight --padding 2
+```
+
+`compact` is the default. It removes authoring IDs and unnecessary
+whitespace, shortens paths and colours, and leaves out fixed width and height
+attributes.
+
+`semantic` keeps stable logical shape IDs. `animation` wraps every model
+shape in a stable group so its fills and stroke move together. `--tight`
+calculates the smallest safe viewBox without changing `project.json`.
 
 ## Repository layout
 
-```
-skills/png2svg/          the distributable skill — this is the product
-  SKILL.md               the workflow
-  references/            conventions, model schema, worked examples
-  scripts/
-    png2svg/             the engine (also the package this repo builds)
-      measure.py         subpixel boundaries, line/circle/corner fits
-      outline.py         contour -> lines/arcs/cubics, verified constraints
-      curves.py          Bezier chain fitting
-      paint.py           gradient and flat-colour recovery
-      svggen.py          deterministic SVG generation
-      compare.py         metrics, incl. texture_std and low-frequency deltaE
-    png2svg_cli.py       zero-install entry point
-    measure_template.py  copy-and-edit starting point
-    build_template.py    split-file variant
-examples/                real per-image measure/build scripts
-tests/                   45 tests, including rendering regressions
+```text
+skills/png2svg/          distributable skill and bundled engine
+  SKILL.md               agent workflow
+  references/            conventions, model schema and worked reasoning
+  scripts/png2svg/       deterministic measurement and SVG library
+  scripts/*_template.py  starting points for per-image reconstruction
+examples/
+  assets/                the three publishable source images
+  build_keep_model.py    fitted Keep construction
+  measure_n.py           IN measurements
+  build_n_model.py       IN model
+  measure_p.py           P Auto measurements
+  build_p_model.py       P Auto model
+tests/                   ground-truth and rendering regressions
+work/                    ignored private artwork, models and generated files
 ```
 
-The package lives inside the skill so the skill is self-contained; this
-repo's `pyproject.toml` points at it there, so there is exactly one copy.
+The Python package lives inside the skill so the installed skill remains
+self-contained. `pyproject.toml` points at that single copy.
 
-## Local development
+## Develop the engine
 
 ```bash
 uv sync
 uv run pytest
 uv run png2svg --help
+uvx --from skills-ref agentskills validate ./skills/png2svg
 ```
 
-Tests cover schema validation, deterministic generation, raster/script
-absence, solid/linear/conic rendering against ground truth (including the
-wedge-seam and centre-pinhole regressions), geometry helpers, and metric
-behaviour on synthetic shifted and recoloured fixtures.
+The 87 tests cover deterministic generation, schema validation, security,
+subpixel measurement, reusable geometry, gradient fitting, export profiles
+and renderer regressions.
 
-## What it can and cannot do
+## Artwork that works well
 
-**Suitable**: flat or gradient fills, crisp edges, shapes decomposable into
-lines, arcs and Béziers. If it could have been built in Figma from shapes and
-gradients, it is recoverable — including layered overlaps, conic sweeps and
-squircle-smoothed corners.
+Clean logos with flat or gradient fills are the best fit. Lines, arcs,
+Béziers, overlapping primitives, conic sweeps and smoothed corners can all be
+reconstructed as editable geometry.
 
-**Good enough**: textured 3D renders, brushed metal, grain, drop shadows and
-glow. Structure and large-scale shading reconstruct; texture is dropped
-deliberately and the result is judged on IoU and low-frequency ΔE. Refusing
-these outright would be the wrong call — they reconstruct usefully, just not
-exactly.
+Textured renders can still produce useful SVGs. png2svg keeps their structure
+and large-scale shading while dropping grain, brushed metal and small
+photographic details. Low-frequency colour metrics are used for those cases.
 
-**Not suitable**: photographs, painterly artwork, anything under ~100px.
-Use vtracer or potrace there.
+Photographs, painterly artwork and tiny images under roughly 100px should use
+a contour tracer such as vtracer or potrace instead.
 
-## Known limitations
+## Current limitations
 
-- Conic gradients compile to wedge fans (48 wedges per cap), which costs
-  bytes. A future exporter could emit CSS `conic-gradient` for HTML.
-- There is no fully automatic one-shot `reconstruct` command, and there will
-  not be: decomposition needs judgment. The library makes every measurement
-  deterministic; the agent writes the per-image script.
-- `validate`'s halo checks assume artwork sits on transparency, so they
-  false-fail on full-canvas designs.
-- No interactive editor UI — the agent loop plays that role.
+- SVG has no portable conic-gradient primitive. Conic fills compile to wedge
+  fans, which cost more bytes than linear or radial gradients.
+- Decomposition needs visual judgment, so there is no automatic
+  `reconstruct` command.
+- The agent loop acts as the editor. There is no separate interactive UI.
 
 ## License
 
-MIT
+The code is MIT licensed. Source images under `examples/assets/` have
+separate ownership and reuse terms described in their artwork notice.

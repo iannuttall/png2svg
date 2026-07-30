@@ -12,6 +12,7 @@ Writes work/p/analysis/measurements.json.
 """
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -21,7 +22,7 @@ from scipy import ndimage, optimize
 from png2svg.compare import foreground_mask
 from png2svg.measure import Field, edge_point, edge_samples, fit_line, intersect
 
-proj = Path("work/p")
+proj = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("work/p")
 meta = json.loads((proj / "project.json").read_text())
 BG = tuple(meta["source"]["background"][:3])
 IMG = proj / "source" / meta["source"]["path"].split("/")[-1]

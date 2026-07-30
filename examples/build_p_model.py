@@ -4,13 +4,14 @@ Corners are circular fillets, the bowl is two cubics, the plug tapers are
 S-cubics between parallel verticals."""
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 
 from png2svg.model import load_project, save_project
 
-proj_dir = Path("work/p")
+proj_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("work/p")
 M = json.loads((proj_dir / "analysis" / "measurements.json").read_text())
 X, Y, FI, B = M["x"], M["y"], M["fillets"], M["bowl"]
 

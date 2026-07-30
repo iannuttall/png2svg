@@ -1,7 +1,8 @@
 [project]
 name = "png2svg"
 version = "0.2.0"
-description = "Deterministic measurement and SVG reconstruction tools for the png2svg skill"
+description = "Agent-guided PNG to SVG reconstruction for geometric logos and icons"
+keywords = ["png", "svg", "vectorization", "logo", "reconstruction"]
 readme = "README.md"
 authors = [
     { name = "ian nuttall", email = "6681919+iannuttall@users.noreply.github.com" }

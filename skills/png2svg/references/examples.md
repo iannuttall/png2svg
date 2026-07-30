@@ -1,269 +1,129 @@
 # Worked reconstructions
 
-Read the one closest to your image before starting. Every script referenced
-lives in `examples/` in the source repository.
+The source repository publishes three examples. Each one uses artwork Ian
+owns or has permission to distribute.
 
 | source | result | what it teaches |
 |---|---|---|
-| plug 'P' mark | IoU 0.9983, edge 0.092px, 33 nodes | tangency, fillets, hand measurement |
-| 'N' monogram | IoU 0.9976, edge 0.101px, 26 nodes | flat polygons, discarding a watermark |
-| gradient loop | IoU 0.9873, 108 nodes | counters, a cap drawn over an end, trimming a shadow out of a gradient |
-| ribbon + cylinder | IoU 0.9740, 85 nodes | occlusion in three pieces, fitting an ellipse instead of tracing one |
-| textured app icon | IoU 0.9264, low-freq ΔE 5.3 | "good enough": structure kept, grain dropped |
+| Keep | IoU 0.9966, edge 0.146px, 57 nodes | overlapping primitives, clipping and mixed corner radii |
+| IN monogram | IoU 0.9976, edge 0.099px, 26 nodes | fitted polygons and artifact removal |
+| P Auto | IoU 0.9988, edge 0.067px, 33 nodes | tangency, fillets and a connected cutout |
 
-The last two are worth reading even if your image looks nothing like them:
-they are where the decisions are, and the decisions are the part no library
-can make for you.
+Read the closest example before choosing a reconstruction route. The scripts
+live under `examples/` in the source repository.
 
-## Curves, fillets and tangency: a plug 'P' mark (498x524)
+## Keep uses overlapping fitted primitives
 
-**Final**: IoU 0.9983, edge mean 0.092px (max 1.0), ΔE2000 mean 0.71 / p95
-1.60, 33 nodes in one path, 998-byte export.
+**Final result:** IoU 0.9966, edge mean 0.146px, Delta E mean 0.72, 57 model
+nodes across 3 shapes and a 1,284-byte compact SVG.
 
-A flat black P with a plug notched out of it. The first thing to establish
-was that the plug **opens at the bottom**; it is not a counter, so the whole
-mark is one contour. Tracing the filled mask and subtracting the mask itself
-finds holes; here there were none, which settled it in one command.
+The mark has three disconnected groups. The large right group combines a
+central vertical rectangle with two diagonal arms. The left group combines
+two clipped diagonal arms with one horizontal bar. A detached arrow forms
+the third group.
 
-What the measurements revealed:
+`analyse` found repeated spacing and corners much tighter than the usual
+rounding. Those measurements point to overlapping primitives because the
+sharp corners are intersections between shapes. Tracing the visible union
+would turn those incidental intersections into permanent path nodes.
 
-- **The bowl is tangent to both flats.** Profiling the boundary along the top
-  showed y = 60.39 dead flat from x=90 to x=270 (varying by 0.03px), then
-  departing smoothly. Same at the bottom. That fixes the bowl's vertical
-  extent exactly and removes two parameters.
-- **It is not a conic.** The right side is about a pixel fuller above the
-  midline than below. A free ellipse left a systematic residual pattern, so
-  the bowl is modelled as a type designer would draw it: two cubics with
-  horizontal tangents at the flats and a vertical tangent at the right
-  extreme, handle lengths free. Four anchor points, two segments.
-- **The prong caps had to be tangency-constrained**; see convention 4. The
-  free fit gave r=9.612 against a half-width of 9.559, and the resulting SVG
-  arc rendered a full pixel low. Forcing r to the half-width both fixed it
-  and fitted better (rms 0.056 against 0.190).
-- **The plug tapers are S-cubics**: the body sides and the neck sides are all
-  vertical, so each transition is one cubic with vertical tangents at both
-  ends; two free handle lengths and two endpoint positions.
-- **Fillet radii came from one scan each.** For a fillet of radius r between
-  edges meeting at half-angle θ, the vertex-to-arc distance along the
-  bisector is r/sin(θ) − r. Measure that distance and r follows. The mark
-  uses 3.6-4.9 on the stem, 7.1 on the plug body, 1.6-2.9 where the prongs
-  meet it.
+The build script declares each construction as a function of a short
+parameter vector:
 
-The plug is a light region *inside* the ink, which inverts the scan
-direction: its rays start in the plug interior and run outward. Getting that
-backwards returns zero samples every time (convention 2).
+```python
+def build_right(p):
+    vertical = primitives.rectangle(...)
+    upper = primitives.oriented_rectangle(...)
+    lower = primitives.oriented_rectangle(...)
+    return [(vertical, vr), (upper, upper_r), (lower, lower_r)]
 
-Note also that the first score was IoU 0.9938 with edge mean 0.344; bad
-enough to suggest a broken model, when the model was already correct. It was
-renderer quantisation. See the noise floors in
-[conventions.md](conventions.md) before rebuilding anything.
+fit = primitives.fit_union(contour, build_right, p0, bounds=bounds)
+```
 
-See `examples/measure_p.py` and `examples/build_p_model.py` in the source
-repository.
+Hidden diagonal ends run beneath the central bar. Their precise length is
+unobservable, so the script fixes it long enough to guarantee overlap and
+fits only the visible outer endpoint, angle, width and radius.
 
-## Flat polygons with an artefact: an N-monogram (1504x1128 WebP)
+The left diagonals stop at a measured vertical cut line:
 
-**Final**: IoU 0.9976, edge mean 0.101px, ΔE mean 0.60 / p95 5.17, 26 nodes,
-775-byte export. Converged in one iteration.
+```python
+arm = primitives.oriented_rectangle(...)
+arm = primitives.clip_halfplane(arm, (1.0, 0.0), cut_x)
+```
 
-Four flat polygons, two colours, six rounded corners. Sides fell into two
-slope families (+0.45 / −0.424); matching each measured side to its family
-was most of the work.
+Corners on that cut stay sharp while the visible outer corners remain
+rounded. A radius list such as `[r, r, 0, 0]` passes unchanged through the
+fitter, raster mask, crop bounds and path emitter.
 
-The source carried a diagonal stock watermark. It was reconstructed **clean**
-and the watermark deliberately discarded, which is why p95 is elevated. That
-choice is recorded in the model notes. The watermark also fooled the
-automatic `analyse` pass; it fragmented straight edges into "curves" and
-pushed paint probes to `linear`/`complex`; so colours were sampled as
-medians of eroded interiors instead. Treat `analyse` output as a proposal.
+The arrow uses the same mixed-radius representation. Its shoulders are
+sharp, while its tip and far corners use independent circular rounding.
+Describing the symmetry with a centre and half-height removes a parameter
+and keeps the two sides tied together.
 
-## Occlusion: a ribbon behind a cylinder
+The model deliberately drops the source's soft shadow, edge glow and
+low-level texture. Adding traced shadow shapes barely changes silhouette
+overlap and makes the SVG harder to edit. The model notes record that choice
+so the remaining colour residual is expected.
 
-**Final**: IoU 0.9740, ΔE mean 1.27 / p95 2.31, 85 nodes across 5 shapes.
-Script: `examples/build_r_model.py`, ~130 lines, almost all of it decisions.
+See `examples/build_keep_model.py`.
 
-A ribbon spirals behind a cylinder, so it arrives as **three separate
-visible pieces**. No occlusion machinery was needed; each piece is its own
-region; but each is grown underneath the cylinder before tracing, and the
-cylinder is painted last, so no hairline of background can show along a
-join. Grow into the occluder itself, never a dilated copy of it: a ribbon
-allowed past the cylinder's own edge hangs out over the background, which
-costs far more than the seam it was avoiding.
+## IN measures four fitted polygons
 
-The cylinder's top face taught the other lesson. Traced, it came out ragged
-and dripping, because the blue/dark boundary is a soft colour transition
-*inside* the silhouette; no background to scan against, so the contour fell
-back to raw pixels. Fitted as the ellipse indicated by its boundary, max residual
-0.65px. When a boundary is internal, fit the shape rather than trace it.
+**Final result:** IoU 0.9976, edge mean 0.099px, Delta E mean 0.60, 26 model
+nodes across 4 shapes and a 710-byte compact SVG.
 
-## A gradient loop with a cap and a shadow
+The monogram contains four flat polygons in two colours. Its sides collapse
+into two slope families, roughly `+0.45` and `-0.424`. Measuring every edge
+independently first reveals that shared design grid.
 
-**Final**: IoU 0.9873, ΔE mean 1.02, 108 nodes. Script:
-`examples/build_q_model.py`.
+Each edge is sampled away from its corners, fitted as a line and intersected
+with the next fitted edge. This avoids trusting pixel-level contour vertices,
+which are least reliable exactly where the direction changes.
 
-Three things made this one instructive. Its width looked constant (medial
-axis median 60.0) so it looked like a stroked path; but measured *per run*
-the widths were 58.9, 63.9 and 56.8, steady within each run and different
-between them. A single stroke would have been wrong by 3.5px. **Verify a
-width per run before believing it is a stroke.**
+Six corners use fitted cubic smoothing. The scripts recover the tangent
+points and handle lengths from local boundary samples, then build the final
+polygons from those measured lines and cubics.
 
-Its paint fitted a gradient at rms 6.5, which read as "not a linear
-gradient". It was: a shadow where the stroke crosses itself was dragging the
-fit. With `trim=0.12` the same paint came back as a plain two-stop ramp at
-rms 1.5.
+The source contains a diagonal watermark grid. It fragments automatic
+outline analysis and makes flat paint look more complex than it is. The
+reconstruction removes the watermark and samples colour from eroded interior
+regions. Delta E p95 remains higher along the discarded grid, which is
+expected and documented in the model notes.
 
-Its outline was traced from the loop **alone**, not from the silhouette.
-Tracing the union would have put the cap's outline into the loop's path,
-where the two meet at sharp concave junctions that any segmenter cuts the
-corner on. Tracing the loop alone and running it under the cap took the
-outer path from 59 primitives to 25.
+See `examples/measure_n.py` and `examples/build_n_model.py`.
 
-## "Good enough": a textured app icon
+## P Auto keeps the plug as a real cutout
 
-**Final**: IoU 0.9264, `texture_std` 4.3, low-frequency ΔE 5.3 / 22.5, 351
-nodes. Script: `examples/build_x_model.py`.
+**Final result:** IoU 0.9988, edge mean 0.067px, Delta E mean 0.71, 33 nodes
+in one path and an 852-byte compact SVG.
 
-A 3D-rendered icon: brushed metal, grain, drop shadows, a glow, engraved
-text and a scanline waveform. Its interior varies by ~15 levels on its own,
-so per-pixel ΔE cannot be satisfied and chasing it would be chasing noise.
+The first useful fact is topological. The plug opens through the bottom of
+the P, so the white region connects to the outside. The entire mark is one
+contour with a notch. Treating the plug as a background-coloured shape would
+break when the logo is placed over another colour.
 
-Reconstructed: backdrop wash, dark shell, metal plate, screen, slot.
-Dropped deliberately, and recorded in the model notes: grain, brushed
-streaks, engraved text, the waveform. Outlines fitted at `tol=1.2px`; near
-the texture scale, because fitting tighter than the grain fits the grain.
+The bowl is tangent to flat top and bottom runs. Its upper quarter is about
+one pixel fuller than its lower quarter, so a single ellipse leaves a
+systematic residual. Two cubic segments hold the measured shape with
+horizontal tangents at the flats and a vertical tangent at the right
+extreme.
 
-Known remaining defects, since these are more useful than a clean-looking
-summary: the waveform still cuts a notch into the screen, and `validate`
-fails its halo checks here because the design covers the whole canvas while
-those checks assume artwork sits on transparency.
+The prong caps expose a common arc mistake. A free circle fit returned a
+radius slightly larger than half the measured prong width. SVG could not
+place that circle on the chord without moving the cap. Constraining the
+radius to the half-width improved the fit and kept the arc exactly tangent.
 
-## Straight edges on a design grid
+The plug body and neck sides are parallel vertical runs. Each taper is one
+cubic with vertical tangents at both ends. Small body and stem fillets come
+from local bisector measurements.
 
-For a logo built entirely from straight lines, the method in convention 8 is
-the whole job: sample every edge, fit each as a line, take vertices from the
-intersections, then read the fitted angles for structure.
+The plug is background inside dark ink, so its measurement rays start within
+the light cutout and travel outward into the mark. Reversing that direction
+returns no useful transition.
 
-Angles that collapse into a few families are the design grid confessing
-itself. When a frame is provably regular; say an outer and inner hexagon
-sharing a centre; fit it as **one** constrained system rather than edge by
-edge: with the edge normals known, `(Cx, Cy, apothem_out, apothem_in)` is a
-linear least-squares problem over all of that frame's samples at once, and it
-will fit tighter than any edge fitted alone.
+An early check reported IoU 0.9938 and edge mean 0.344px even though the
+measured model was correct. Rendering at 4x and downsampling moved the same
+model to IoU 0.9983 and edge mean 0.092px. This is the renderer quantisation
+case described in [conventions.md](conventions.md).
 
-Then verify the coincidences before enforcing them; a vertex landing exactly
-on another shape's edge, or on the frame's centre, is a real constraint worth
-keeping. Leave anything that does not survive the check free: forcing two
-near-parallel diagonals onto the grid can cost more than it saves.
-
-## Gradients
-
-Where a gradient is piecewise-linear in sRGB, recover its construction rather
-than sampling it (convention 6). Find the axis by minimising cross-axis
-colour variance, fit line segments per channel, and read the stop colours off
-the segment ends. Then refit the stop *positions* with the colours held
-fixed. Offsets that land exactly on 0.5, or an axis that passes precisely
-through the artwork's centre, are the designer's decisions rather than
-coincidences; and a palette whose channels repeat across stops is a good
-sign the fit found the real construction rather than a local minimum.
-
-## A gradient that follows an S
-
-A long S-shaped ribbon exposed the difference between paint in page
-coordinates and paint in travel coordinates. One horizontal gradient across
-the page made both bars run in the same direction and could not turn around
-the caps.
-
-The portable SVG construction is five local paint spans on two overlapping
-hook shapes:
-
-1. top linear bar, travelling right to left;
-2. conic left cap;
-3. middle linear bar, travelling left to right;
-4. conic right cap;
-5. bottom linear bar, travelling right to left.
-
-Each span gets its own start and end position in one global 0..1 ramp.
-`paint.map_ramp` converts the global knots into the fewest local stops for
-that span. A reversed bar uses `start > end`; the adjacent cap starts at
-the same global position, so its seam colour is identical by construction.
-
-This keeps the visual decision explicit. SVG still has no native
-gradient-along-path fill, and hiding this behind a global gradient or a
-one-shot reconstruction would make the turn direction impossible to inspect.
-The conic emitter shares one ramp definition across all wedges, avoiding
-repeated colour-stop markup.
-
-## Close components and mixed corner radii
-
-A detached bar sitting 7px from another component exposed a bad measurement
-assumption: the old fixed 9px contour offset started inside the neighbour and
-returned its edge. The resulting contour jumped 8px and expanded from 10
-plausible primitives to 94. Adaptive background corridors keep the same case
-continuous at every requested maximum offset tested.
-
-The same mark had an arrow-like polygon with rounded outer corners and sharp
-notches. Path emission already accepted `[r, 0, r, r, 0]`, but the fitter,
-raster mask and crop bounds accepted only one radius. That split
-representation forced manual geometry. Per-corner radii now pass unchanged
-through `fit_union`, `raster`, `ink_bounds` and `primitives.paths`.
-
-## Overlapping primitives: a slanted "S" of three bars (1500x1125 WebP)
-
-The case where tracing is the wrong tool. Read it before reaching for
-`segment_outline` on anything that might be built from repeated shapes.
-
-The silhouette is a Z with two notches, ten straight runs and ten corners.
-`analyse` reports exactly that, and tracing it costs around forty nodes. But
-the corner radii it returns are the giveaway: four at ~17.0-17.4, two that fit
-as 122.7, and two at ~2.5. A designer does not use five radii on one outline.
-The 122.7 pair were shallow corners measured with too wide a window
-(convention 3), and the ~2.5 pair were not corners at all; they were the
-points where two shapes cross.
-
-Three tells said "overlapping primitives", and any one would have been enough:
-
-- **A seam collinear with a silhouette edge.** The lower-left outer edge,
-  extended up past the notch, continued as the pink/blue colour seam to within
-  0.05px over 300px. One line serving as an outer boundary in one place and an
-  interior seam in another means two shapes sharing an edge.
-- **A spacing that repeats.** 142.979 between the two left slant lines,
-  143.002 between the two right ones.
-- **A middle colour that is exactly an overlap.** Pink band 144px wide, cyan
-  band 144px wide, and the blue between them widening from 147 to 314 exactly
-  as the two Z-bands' intersection would.
-
-What it actually is: three rounded parallelograms sharing one slant, with 180°
-symmetry about `(750.541, 559.487)`. Two congruent Z-bands (pink = upper-left
-rect + lower rect; cyan = the 180° rotation of it) overlap, and the overlap is
-a separate flat fill.
-
-    U   = [cx-a, cx-a+2b] x [cy-g, cy+k]     pink upper
-    P2  = [cx-b, cx+b   ] x [cy-g, cy+g]     = pink lower + cyan upper
-    Lo' = [cx+a-2b, cx+a] x [cy-k, cy+g]     cyan lower
-
-Eight numbers; slant `128.39244`, centre, `a`, `b`, `g`, `k`, radius
-`17.2655`; fixed all of it via `primitives.fit_union` against 2087 contour
-points: **mean 0.080px, p95 0.221px**. The band offset (`a - b` = 143.049) and
-each short rect's width (`2b`) fell out of the symmetry; both had been measured
-independently first, and their agreement to 0.02px is what confirmed the
-decomposition before anything was derived from it.
-
-Three things this mark taught that generalise:
-
-1. **The overlap's corners are free.** Blue is `pink ∩ cyan`, and it decomposes
-   into three more rounded parallelograms whose every corner is a genuine
-   corner of one of the four band rects. So all twelve of its fillets are the
-   artwork's own `r`; none had to be invented for an intersection.
-2. **Each parallelogram carries its own ramp.** There is a hard colour jump at
-   the seam tip; the upper rect ends `#fd30f8` where the lower restarts
-   `#fc59e9`. Four gradients, not two, and the two rects of a band share one
-   ramp in local y (`paint.fit_shared_ramp`, rms 1.7 pooled).
-3. **The blue overlap is flat**, at `#4548e9` with a spread of 0.8. Worth
-   checking before assuming a blend mode: a multiply of two gradients would not
-   be flat, so this was drawn as its own shape.
-
-Final: IoU 0.9988, edge mean 0.081px, ΔE mean 0.91, p95 2.52, at 63 nodes and
-2.8KB. The ΔE max of 58.9 is a "logo for sale" watermark badge that was
-deliberately not reconstructed, and the rest of the residual is the source's
-own sharpening ringing; it undershoots to `(200,89,181)` one pixel inside
-edges, darker than either side, which no clean vector can or should match.
+See `examples/measure_p.py` and `examples/build_p_model.py`.

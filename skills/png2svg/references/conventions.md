@@ -79,12 +79,10 @@ glance, and each of the first two has been the right answer on real artwork:
 
 **The discriminator between 2 and 3 is to un-shear and refit.** Take the
 contour, apply the inverse of the shear that makes the slanted edges vertical,
-and fit circles at the (now 90°) corners. If it is case 3 you get one radius
-across every corner; if it is case 2 you get nonsense. On the swipe-s mark the
-un-sheared fit gave 0.96-1.14px residuals with two disagreeing radii (7 and
-38), while circular-in-final-space gave 0.19-0.34px with one radius. Rejected
-in ten minutes, and it would have been an afternoon of wrong geometry
-otherwise.
+and fit circles at the now 90-degree corners. If it is case 3 you get one
+radius across every corner. If it is case 2 the radii disagree and the
+residuals rise. Compare that result with a circular fit in final space before
+choosing the model.
 
 One polygon may genuinely use different circular radii at different corners.
 Pass a radius list with one value per vertex. `rounded_convex_sdf`,
@@ -238,10 +236,10 @@ normals are known.
 
 Write the construction down as a function of a parameter vector, and
 quantities you were about to measure stop being parameters at all. On a mark
-of three rounded parallelograms with 180° symmetry, the offset between them
-and each one's width both fell out of the symmetry: eight numbers fixed the
-whole silhouette to a mean residual of 0.080px. See
-[examples.md](examples.md) for the construction.
+with a mirrored arrow, use a centre and half-height instead of fitting its
+top and bottom independently. The same rule applies to repeated arms,
+shared widths and rotational copies. See the Keep reconstruction in
+[examples.md](examples.md).
 
 Use `primitives.fit_union` for this rather than rolling your own solve; it
 takes the contour and a `build(p)` returning `(vertices, radius)` pairs, and

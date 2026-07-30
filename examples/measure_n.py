@@ -2,6 +2,7 @@
 rounded-corner cubics. Writes work/n/analysis/measurements.json."""
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -9,7 +10,7 @@ from PIL import Image
 
 from png2svg.measure import Field, edge_point, fit_corner_full, fit_line_x_of_y
 
-proj = Path("work/n")
+proj = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("work/n")
 rgb = np.asarray(Image.open(proj / "source" / "in.webp").convert("RGB"))
 F = Field(rgb, (255, 255, 255))
 
@@ -192,5 +193,7 @@ def clean(o):
     return o
 
 
-(proj / "analysis" / "measurements.json").write_text(json.dumps(clean(M), indent=2) + "\n")
+analysis = proj / "analysis"
+analysis.mkdir(parents=True, exist_ok=True)
+(analysis / "measurements.json").write_text(json.dumps(clean(M), indent=2) + "\n")
 print("wrote measurements.json")

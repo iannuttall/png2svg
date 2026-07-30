@@ -1,4 +1,4 @@
-"""Extract the plug on its own, as a menu-bar icon.
+"""Extract the plug on its own as a menu-bar icon.
 
 The plug exists in work/p only as a notch cut out of the P, so every edge of
 it is already measured — this rebuilds the same geometry as a filled shape
@@ -7,7 +7,7 @@ the P the cord runs off and is cut by the bowl, so the end is invented here
 and rounded, which reads as intentional where a flat chop reads as a
 cropping mistake.
 
-Writes output-plug.svg (rounded cord) and output-plug-flat.svg.
+Writes four variants under work/p/generated/.
 """
 
 import json
@@ -22,6 +22,7 @@ M = json.loads(Path("work/p/analysis/measurements.json").read_text())
 X, Y, FI = M["x"], M["y"], M["fillets"]
 TL, TR = M["taper_left"], M["taper_right"]
 PAD = 8.0          # breathing room so the glyph does not touch the edge
+OUT = Path("work/p/generated")
 
 
 def corner(segs, vertex, u_in, u_out, r):
@@ -124,13 +125,15 @@ def write(path: str, ending: str):
                  "fills": [{"type": "solid", "color": "#000000"}]}],
     )
     proj.validate()
-    Path(path).write_text(generate_svg(proj))
-    print(f"wrote {path}  viewBox 0 0 {w:.2f} {h:.2f}  "
-          f"{len(shifted)} nodes  {len(Path(path).read_text())} bytes")
+    OUT.mkdir(parents=True, exist_ok=True)
+    destination = OUT / path
+    destination.write_text(generate_svg(proj, profile="compact"))
+    print(f"wrote {destination}  viewBox 0 0 {w:.2f} {h:.2f}  "
+          f"{len(shifted)} nodes  {len(destination.read_text())} bytes")
 
 
-for name, ending in (("output-plug.svg", "none"),
-                     ("output-plug-stub.svg", "stub"),
-                     ("output-plug-cord.svg", "cord"),
-                     ("output-plug-flat.svg", "flat")):
+for name, ending in (("plug.svg", "none"),
+                     ("plug-stub.svg", "stub"),
+                     ("plug-cord.svg", "cord"),
+                     ("plug-flat.svg", "flat")):
     write(name, ending)

@@ -2,7 +2,7 @@
 name: png2svg
 description: Reconstruct a geometric PNG (logo, icon, monogram) as a clean native SVG with exact geometry and gradients, using an analyse -> measure -> model -> check -> residuals iteration loop scored by perceptual metrics. Use when asked to vectorise, trace or convert a PNG/WebP logo to SVG, recreate a logo's geometry, rebuild a logo as editable vector, or produce colour variants of a reconstructed logo. Not for photos, textures, or organic artwork.
 license: MIT
-compatibility: Requires Python 3.12+ and uv. Scripts fetch their own dependencies into a cached environment on first run; nothing else needs installing.
+compatibility: Requires uv and network access on first run. uv provisions Python 3.12+ and caches the script dependencies automatically.
 metadata:
   author: iannuttall
   version: "0.2.0"
@@ -55,6 +55,17 @@ do the different job of fitting contours to pixels.
 Everything runs through one entry point: `scripts/png2svg_cli.py` in this
 skill's directory. On first run uv builds a cached environment from the
 script's own dependency block; there is nothing to install.
+
+Check for uv before starting:
+
+```bash
+command -v uv
+uv --version
+```
+
+If uv is missing, stop and ask the user to install it from
+https://docs.astral.sh/uv/getting-started/installation/. Do not require a
+separate Python installation; uv provisions a compatible interpreter.
 
 Below, `$SKILL` stands for this skill's directory (the folder containing this
 file). **Substitute the literal path**: each command may run in a fresh
@@ -344,5 +355,5 @@ matched because the transform is uniform.
   rules and the noise floors. Read before measuring.
 - [references/model.md](references/model.md); `project.json` schema, paint
   types, conic wedge compilation, validation checks.
-- [references/examples.md](references/examples.md); two complete
+- [references/examples.md](references/examples.md); three complete
   reconstructions with the reasoning that got there.
