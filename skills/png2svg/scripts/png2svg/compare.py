@@ -112,8 +112,9 @@ def foreground_mask(
     Works on colour distance from the background so reference PNG and SVG
     render are treated identically (an alpha>=128 rule on one side and a
     colour rule on the other would bias mask edges by up to a pixel).
-    The default threshold is half the 5th-percentile full-strength
-    foreground distance, approximating the 50%-coverage boundary.
+    The default path normalises against a local full-strength foreground
+    distance, then repairs scalar-distance failures at internal colour seams
+    by matching RGB direction from the background.
     """
     rgb = composite_over(img, background).astype(np.float64)
     dist = np.linalg.norm(rgb - np.array(background, dtype=np.float64), axis=-1)
@@ -124,7 +125,32 @@ def foreground_mask(
     # so dark and light shapes get the same effective boundary.
     full = ndimage.maximum_filter(dist, size=9)
     coverage = dist / np.maximum(full, 1e-6)
-    return (coverage >= 0.5) & (dist > 25.0)
+    mask = (coverage >= 0.5) & (dist > 25.0)
+
+    # A maximum of scalar distance is wrong at a seam between two foreground
+    # colours: the darker colour becomes the "full strength" of the lighter
+    # one and can cut a false channel through a solid silhouette. Recheck only
+    # rejected non-background pixels against neighbours pointing in a similar
+    # RGB direction from the background. Outer antialias pixels find their
+    # own full-strength colour; a blend between two foreground colours does
+    # not get normalised by an unrelated darker neighbour.
+    rejected = (dist > 25.0) & ~mask
+    ys, xs = np.nonzero(rejected)
+    if len(xs):
+        vectors = rgb - np.array(background, dtype=np.float64)
+        unit = vectors[ys, xs] / dist[ys, xs, None]
+        best = dist[ys, xs].copy()  # each pixel is its own valid direction
+        for dy in range(-4, 5):
+            yy = np.clip(ys + dy, 0, rgb.shape[0] - 1)
+            for dx in range(-4, 5):
+                xx = np.clip(xs + dx, 0, rgb.shape[1] - 1)
+                neighbour = vectors[yy, xx]
+                neighbour_norm = np.linalg.norm(neighbour, axis=1)
+                projection = np.sum(neighbour * unit, axis=1)
+                similar = projection >= 0.95 * neighbour_norm
+                best = np.maximum(best, np.where(similar, projection, 0.0))
+        mask[ys, xs] = dist[ys, xs] / np.maximum(best, 1e-6) >= 0.5
+    return mask
 
 
 def mask_boundary(mask: np.ndarray) -> np.ndarray:

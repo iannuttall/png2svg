@@ -27,15 +27,15 @@ numbers, and the offset between primitives and each one's width fall out of
 the symmetry rather than being fitted. 8 numbers beat ~40 traced nodes, and
 every one of them is a number a designer typed.
 
-Convexity: `rounded_convex_sdf` requires a convex polygon and one radius,
-because it works by eroding the polygon by r and inflating the result. That
-is not a real restriction -- non-convex artwork is a union of convex pieces,
-which is how it was drawn anyway.
+Convexity: `rounded_convex_sdf` requires a convex polygon. The radius may be
+one value or one value per corner. Non-convex artwork stays a union of convex
+pieces, which is how it was drawn anyway.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 
 import numpy as np
 from scipy import optimize
@@ -68,6 +68,147 @@ def _inward_normals(verts: np.ndarray) -> np.ndarray:
 def _signed_area(verts: np.ndarray) -> float:
     return 0.5 * float(np.sum(verts[:, 0] * np.roll(verts[:, 1], -1)
                               - np.roll(verts[:, 0], -1) * verts[:, 1]))
+
+
+def _radii(radius, count: int) -> np.ndarray:
+    """Normalise a scalar or per-corner radius list."""
+    if np.isscalar(radius):
+        out = np.full(count, float(radius), dtype=np.float64)
+    else:
+        out = np.asarray(radius, dtype=np.float64)
+        if out.shape != (count,):
+            raise PrimitiveError(
+                f"expected one radius or {count} corner radii, got {out.size}"
+            )
+    if np.any(~np.isfinite(out)) or np.any(out < 0):
+        raise PrimitiveError("radii must be finite and >= 0")
+    return out
+
+
+def _validate_convex(verts: np.ndarray) -> float:
+    """Validate a strictly convex polygon and return its turn sign."""
+    if len(verts) < 3:
+        raise PrimitiveError("polygon needs at least 3 vertices")
+    edges = np.roll(verts, -1, axis=0) - verts
+    if np.any(np.linalg.norm(edges, axis=1) < 1e-12):
+        raise PrimitiveError("polygon has a zero-length edge")
+    following = np.roll(edges, -1, axis=0)
+    turns = edges[:, 0] * following[:, 1] - edges[:, 1] * following[:, 0]
+    nonzero = turns[np.abs(turns) > 1e-10]
+    if len(nonzero) != len(turns) or np.any(np.sign(nonzero) != np.sign(nonzero[0])):
+        raise PrimitiveError("rounded polygon must be strictly convex")
+    return float(np.sign(nonzero[0]))
+
+
+def _rounded_parts(verts, radius):
+    """Tangent points and arc centres for a rounded convex polygon."""
+    v = np.asarray(verts, dtype=np.float64)
+    turn_sign = _validate_convex(v)
+    radii = _radii(radius, len(v))
+    edges = np.roll(v, -1, axis=0) - v
+    lengths = np.linalg.norm(edges, axis=1)
+    directions = edges / lengths[:, None]
+    tangent = np.zeros(len(v), dtype=np.float64)
+    incoming = np.roll(directions, 1, axis=0)
+    outgoing = directions
+    for i in range(len(v)):
+        dot = float(np.clip(incoming[i] @ outgoing[i], -1.0, 1.0))
+        turn = math.acos(dot)
+        tangent[i] = radii[i] * math.tan(turn / 2.0)
+    for i, length in enumerate(lengths):
+        if tangent[i] + tangent[(i + 1) % len(v)] > length + 1e-9:
+            raise PrimitiveError(
+                f"corner radii overlap on edge {i}; reduce one or both radii"
+            )
+    before = v - incoming * tangent[:, None]
+    after = v + outgoing * tangent[:, None]
+    inward = _inward_normals(v)
+    centres = before + np.roll(inward, 1, axis=0) * radii[:, None]
+    return v, radii, incoming, outgoing, before, after, centres, turn_sign
+
+
+def rectangle(x: float, y: float, width: float, height: float) -> np.ndarray:
+    """Clockwise vertices of an axis-aligned rectangle."""
+    if width <= 0 or height <= 0:
+        raise PrimitiveError("rectangle width and height must be positive")
+    return np.array(
+        [(x, y), (x + width, y), (x + width, y + height), (x, y + height)],
+        dtype=np.float64,
+    )
+
+
+def oriented_rectangle(
+    centre: tuple[float, float],
+    length: float,
+    width: float,
+    angle_deg: float,
+) -> np.ndarray:
+    """Clockwise rectangle about `centre`, with its long axis at `angle_deg`."""
+    if length <= 0 or width <= 0:
+        raise PrimitiveError("rectangle length and width must be positive")
+    angle = math.radians(angle_deg)
+    along = np.array([math.cos(angle), math.sin(angle)], dtype=np.float64)
+    across = np.array([-along[1], along[0]], dtype=np.float64)
+    c = np.asarray(centre, dtype=np.float64)
+    a = along * (length / 2.0)
+    b = across * (width / 2.0)
+    return np.array([c - a - b, c + a - b, c + a + b, c - a + b])
+
+
+def clip_halfplane(verts, normal: tuple[float, float], limit: float) -> np.ndarray:
+    """Clip a convex polygon to `dot(point, normal) <= limit`.
+
+    This is useful for truncated bars and arrow stems without adding a
+    logo-specific helper. Vertex order is preserved.
+    """
+    polygon = np.asarray(verts, dtype=np.float64)
+    if len(polygon) < 3:
+        raise PrimitiveError("polygon needs at least 3 vertices")
+    nrm = np.asarray(normal, dtype=np.float64)
+    norm = float(np.linalg.norm(nrm))
+    if norm < 1e-12:
+        raise PrimitiveError("half-plane normal must be non-zero")
+    nrm /= norm
+    bound = float(limit) / norm
+    out: list[np.ndarray] = []
+    for a, b in zip(polygon, np.roll(polygon, -1, axis=0)):
+        da = float(a @ nrm - bound)
+        db = float(b @ nrm - bound)
+        a_inside = da <= 1e-12
+        b_inside = db <= 1e-12
+        if a_inside:
+            out.append(a)
+        if a_inside != b_inside:
+            t = da / (da - db)
+            out.append(a + (b - a) * t)
+
+    # A clipping line through an existing vertex can add that vertex twice.
+    # Remove only adjacent numerical duplicates so downstream fillet code
+    # never receives a zero-length edge.
+    cleaned: list[np.ndarray] = []
+    for point in out:
+        if not cleaned or float(np.linalg.norm(point - cleaned[-1])) > 1e-10:
+            cleaned.append(point)
+    if (
+        len(cleaned) > 1
+        and float(np.linalg.norm(cleaned[0] - cleaned[-1])) <= 1e-10
+    ):
+        cleaned.pop()
+
+    if len(cleaned) < 3:
+        raise PrimitiveError("half-plane removes the whole polygon")
+    return np.asarray(cleaned, dtype=np.float64)
+
+
+def paths(shapes) -> list[list]:
+    """Emit one compound path from `(vertices, radius)` primitives."""
+    from .geom import rounded_polygon
+
+    out: list[list] = []
+    for verts, radius in shapes:
+        _rounded_parts(verts, radius)
+        out.extend(rounded_polygon(np.asarray(verts).tolist(), radius))
+    return out
 
 
 def erode_convex(verts, radius: float) -> np.ndarray:
@@ -123,18 +264,93 @@ def convex_sdf(P, verts) -> np.ndarray:
     return np.where(inside, -d, d)
 
 
-def rounded_convex_sdf(P, verts, radius: float) -> np.ndarray:
+def _point_segment_distance(P: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    edge = b - a
+    t = np.clip(((P - a) @ edge) / (edge @ edge), 0.0, 1.0)
+    return np.linalg.norm(P - (a + t[:, None] * edge), axis=1)
+
+
+def _angle_delta(angle: np.ndarray | float, start: float, direction: float):
+    """Positive angular distance from start in the chosen direction."""
+    return np.mod(direction * (angle - start), 2.0 * math.pi)
+
+
+def _mixed_rounded_sdf(P, verts, radius) -> np.ndarray:
+    """Exact boundary distance and sign for independent circular fillets."""
+    P = np.asarray(P, dtype=np.float64)
+    (
+        v,
+        radii,
+        incoming,
+        outgoing,
+        before,
+        after,
+        centres,
+        turn_sign,
+    ) = _rounded_parts(verts, radius)
+    distances = np.full(len(P), np.inf)
+
+    # Flats run from the tangent after one corner to the tangent before the
+    # next. A zero radius simply puts both tangent points on the vertex.
+    for i in range(len(v)):
+        a = after[i]
+        b = before[(i + 1) % len(v)]
+        distances = np.minimum(distances, _point_segment_distance(P, a, b))
+
+    # Arc distance is radial where the point's angle lies within the fillet,
+    # otherwise it is the distance to the nearer tangent endpoint.
+    direction = turn_sign
+    for i, r in enumerate(radii):
+        if r <= 0:
+            continue
+        c = centres[i]
+        start = math.atan2(before[i, 1] - c[1], before[i, 0] - c[0])
+        end = math.atan2(after[i, 1] - c[1], after[i, 0] - c[0])
+        span = float(_angle_delta(end, start, direction))
+        vectors = P - c
+        angles = np.arctan2(vectors[:, 1], vectors[:, 0])
+        on_arc = _angle_delta(angles, start, direction) <= span + 1e-12
+        radial = np.abs(np.linalg.norm(vectors, axis=1) - r)
+        endpoints = np.minimum(
+            np.linalg.norm(P - before[i], axis=1),
+            np.linalg.norm(P - after[i], axis=1),
+        )
+        distances = np.minimum(distances, np.where(on_arc, radial, endpoints))
+
+    # Start with the sharp polygon. At each rounded corner, only the wedge
+    # between its two tangent points differs: that wedge is inside exactly
+    # where it is inside the fillet circle.
+    normals = _inward_normals(v)
+    inside = np.ones(len(P), dtype=bool)
+    for i in range(len(v)):
+        inside &= ((P - v[i]) @ normals[i]) >= -1e-12
+    for i, r in enumerate(radii):
+        if r <= 0:
+            continue
+        toward_vertex_on_incoming = ((P - before[i]) @ incoming[i]) >= -1e-12
+        toward_vertex_on_outgoing = ((P - after[i]) @ outgoing[i]) <= 1e-12
+        in_corner_wedge = toward_vertex_on_incoming & toward_vertex_on_outgoing
+        inside &= ~in_corner_wedge | (
+            np.linalg.norm(P - centres[i], axis=1) <= r + 1e-12
+        )
+    return np.where(inside, -distances, distances)
+
+
+def rounded_convex_sdf(P, verts, radius: float | list[float]) -> np.ndarray:
     """Signed distance to a convex polygon with circular corner rounding.
 
-    Erode by radius, then inflate: the rounded shape is the Minkowski sum of
-    the eroded polygon with a disc, and a Minkowski sum with a disc of radius
-    r has signed distance `sdf(core) - r`.
+    A scalar radius uses the eroded-core Minkowski construction. A radius
+    list uses the exact line and circular-arc boundary with an analytic
+    inside test. Both paths return real pixel distances.
     """
-    if radius < 0:
-        raise PrimitiveError("radius must be >= 0")
-    if radius == 0:
-        return convex_sdf(P, verts)
-    return convex_sdf(P, erode_convex(verts, radius)) - radius
+    if np.isscalar(radius):
+        value = float(radius)
+        if value < 0:
+            raise PrimitiveError("radius must be >= 0")
+        if value == 0:
+            return convex_sdf(P, verts)
+        return convex_sdf(P, erode_convex(verts, value)) - value
+    return _mixed_rounded_sdf(P, verts, radius)
 
 
 def union_sdf(P, shapes) -> np.ndarray:
@@ -151,6 +367,7 @@ class UnionFit:
     params: np.ndarray
     residual: np.ndarray
     kept: np.ndarray = field(repr=False)
+    contour: np.ndarray = field(repr=False)
     n_trimmed: int = 0
 
     @property
@@ -179,6 +396,21 @@ class UnionFit:
         """Indices into the *kept* contour and their signed residuals."""
         order = np.argsort(-np.abs(self.residual))[:k]
         return [(int(i), float(self.residual[i])) for i in order]
+
+    def worst_points(
+        self, k: int = 8
+    ) -> list[tuple[int, tuple[float, float], float]]:
+        """Original contour index, coordinate, and residual for worst points."""
+        source = np.flatnonzero(self.kept)
+        order = np.argsort(-np.abs(self.residual))[:k]
+        return [
+            (
+                int(source[i]),
+                (float(self.contour[source[i], 0]), float(self.contour[source[i], 1])),
+                float(self.residual[i]),
+            )
+            for i in order
+        ]
 
 
 def fit_union(contour, build, p0, *, bounds=None, trim: float = 0.0,
@@ -229,8 +461,13 @@ def fit_union(contour, build, p0, *, bounds=None, trim: float = 0.0,
             break
         keep = nxt
 
-    return UnionFit(params=p, residual=union_sdf(C[keep], build(p)),
-                    kept=keep, n_trimmed=int((~keep).sum()))
+    return UnionFit(
+        params=p,
+        residual=union_sdf(C[keep], build(p)),
+        kept=keep,
+        contour=C,
+        n_trimmed=int((~keep).sum()),
+    )
 
 
 def raster(shapes, width: int, height: int, inset: float = 0.0) -> np.ndarray:
@@ -246,20 +483,51 @@ def raster(shapes, width: int, height: int, inset: float = 0.0) -> np.ndarray:
 
 
 def ink_bounds(shapes):
-    """Exact (x0, y0, x1, y1) of a union -- the viewBox for a cropped export.
+    """Exact (x0, y0, x1, y1) of a rounded-primitive union.
 
-    Solved, not sampled. A rounded convex polygon is the Minkowski sum of its
-    eroded core with a disc of radius r, and a Minkowski sum with a disc grows
-    the bounding box by exactly r on every side. So the answer is the core's
-    bbox pushed out by r -- no marching, no resolution parameter, and exact
-    even where the extreme point sits mid-arc rather than at a vertex.
+    Scalar radii use the eroded core. Mixed radii test the line endpoints and
+    every cardinal angle that lies on a corner arc. Nothing is sampled.
     """
     if not shapes:
         raise PrimitiveError("union is empty")
     lo = np.full(2, np.inf)
     hi = np.full(2, -np.inf)
     for verts, r in shapes:
-        core = erode_convex(verts, r) if r > 0 else np.asarray(verts, float)
-        lo = np.minimum(lo, core.min(axis=0) - r)
-        hi = np.maximum(hi, core.max(axis=0) + r)
+        if np.isscalar(r):
+            value = float(r)
+            core = erode_convex(verts, value) if value > 0 else np.asarray(verts, float)
+            lo = np.minimum(lo, core.min(axis=0) - value)
+            hi = np.maximum(hi, core.max(axis=0) + value)
+            continue
+        (
+            v,
+            radii,
+            _incoming,
+            _outgoing,
+            before,
+            after,
+            centres,
+            turn_sign,
+        ) = _rounded_parts(verts, r)
+        candidates = [before, after]
+        for i, radius in enumerate(radii):
+            if radius <= 0:
+                continue
+            c = centres[i]
+            start = math.atan2(before[i, 1] - c[1], before[i, 0] - c[0])
+            end = math.atan2(after[i, 1] - c[1], after[i, 0] - c[0])
+            span = float(_angle_delta(end, start, turn_sign))
+            for angle in (0.0, math.pi / 2.0, math.pi, 3.0 * math.pi / 2.0):
+                if float(_angle_delta(angle, start, turn_sign)) <= span + 1e-12:
+                    candidates.append(
+                        np.array(
+                            [[
+                                c[0] + radius * math.cos(angle),
+                                c[1] + radius * math.sin(angle),
+                            ]]
+                        )
+                    )
+        points = np.concatenate(candidates, axis=0)
+        lo = np.minimum(lo, points.min(axis=0))
+        hi = np.maximum(hi, points.max(axis=0))
     return (float(lo[0]), float(lo[1]), float(hi[0]), float(hi[1]))

@@ -24,8 +24,32 @@ class Field:
         self.dist = np.linalg.norm(
             rgb.astype(np.float64) - np.array(background, dtype=np.float64), axis=-1
         )
+        self.height, self.width = self.dist.shape
+        ring = np.concatenate(
+            (
+                self.dist[:2].ravel(),
+                self.dist[-2:].ravel(),
+                self.dist[:, :2].ravel(),
+                self.dist[:, -2:].ravel(),
+            )
+        )
+        median = float(np.median(ring))
+        mad = float(np.median(np.abs(ring - median)))
+        # A border-derived background can differ slightly from the page
+        # interior after compression or a faint page gradient. Admit the
+        # image's lower quartile only when it stays close to the border; a
+        # low-contrast foreground farther away must remain foreground.
+        page_low = float(np.percentile(self.dist, 25))
+        page_background = page_low if page_low <= median + 12.0 else median
+        self.background_level = page_background
+        self.background_limit = max(
+            median + max(10.0, 5.0 * 1.4826 * mad),
+            page_background + 5.0,
+        )
 
     def at(self, x: float, y: float) -> float:
+        if not self.contains(x, y):
+            raise ValueError(f"sample ({x:g}, {y:g}) is outside the image")
         x0, y0 = int(x), int(y)
         fx, fy = x - x0, y - y0
         d = self.dist
@@ -35,6 +59,58 @@ class Field:
             + d[y0 + 1, x0] * (1 - fx) * fy
             + d[y0 + 1, x0 + 1] * fx * fy
         )
+
+    def contains(self, x: float, y: float) -> bool:
+        """Whether bilinear interpolation is defined at `(x, y)`."""
+        return 0.0 <= x < self.width - 1 and 0.0 <= y < self.height - 1
+
+
+def _background_offset(
+    field: Field,
+    origin: np.ndarray,
+    outward: np.ndarray,
+    maximum: float,
+    *,
+    minimum: float = 1.0,
+    step: float = 0.5,
+) -> float | None:
+    """Farthest background point before another foreground shape.
+
+    A fixed scan offset is unsafe when two components are close: it can put
+    the ray inside the neighbour, so the first crossing belongs to the wrong
+    shape. Starting near the boundary and walking outward finds the connected
+    background corridor instead. The fixed sampling grid makes the result
+    deterministic.
+    """
+    found = None
+    entered_background = False
+    first_excess = None
+    distances = np.arange(minimum, maximum + step * 0.25, step)
+    for distance in distances:
+        point = origin + outward * distance
+        if not field.contains(float(point[0]), float(point[1])):
+            break
+        value = field.at(float(point[0]), float(point[1]))
+        is_background = value <= field.background_limit
+        if is_background:
+            entered_background = True
+            found = float(distance)
+        elif entered_background:
+            # This is the next component (or the image border), not more room
+            # in which to start the current component's scan.
+            break
+        else:
+            excess = max(0.0, value - field.background_level)
+            if first_excess is None:
+                first_excess = excess
+            if distance >= 2.5 and excess > max(2.0, first_excess * 0.6):
+                # On the correct side a blurred edge falls quickly toward
+                # background. A foreground plateau means this is the inside.
+                return None
+        if not entered_background and distance >= 4.5:
+            # A traced edge is never this far from its connected background.
+            return None
+    return found
 
 
 def edge_cross(
@@ -53,17 +129,74 @@ def edge_cross(
     """
     ts = np.arange(0.0, t_max, step)
     vals = np.array([field.at(p0[0] + t * direction[0], p0[1] + t * direction[1]) for t in ts])
-    above = np.where(vals > 60.0)[0]
-    if len(above) == 0:
-        return None
-    i0 = above[0]
-    plateau_lo = min(i0 + int(2.5 / step), len(vals) - 1)
-    plateau_hi = min(i0 + int(8.0 / step), len(vals))
-    if plateau_hi - plateau_lo < 3:
-        return None
-    steady = float(np.median(vals[plateau_lo:plateau_hi]))
-    half = steady / 2.0
-    for i in range(max(i0 - int(3.0 / step), 0), plateau_lo):
+    baseline = float(np.median(vals[: max(2, int(0.8 / step))]))
+    minimum_contrast = max(
+        3.0, field.background_limit - field.background_level
+    )
+    threshold = baseline + minimum_contrast
+
+    # Find connected foreground runs instead of sampling a fixed window
+    # 2.5-8px inside. The fixed window fails on thin strokes because it has
+    # already crossed out the other side. Nearby weak runs are grouped with
+    # a stronger plateau so resampling overshoot cannot steal the crossing.
+    # An isolated weak run is retained for genuine low-contrast thin strokes.
+    cursor = 0
+    background_needed = max(3, int(0.5 / step))
+    weak_candidate: tuple[int, float, int] | None = None
+    while True:
+        candidates = np.where(vals[cursor:] > threshold)[0]
+        if len(candidates) == 0:
+            if weak_candidate is None:
+                return None
+            i0, steady, _ = weak_candidate
+            break
+        i0 = cursor + int(candidates[0])
+        search_end = min(i0 + int(10.0 / step), len(vals))
+        end = search_end
+        next_cursor = i0 + 1
+        background_run = 0
+        for j in range(i0, search_end):
+            if vals[j] <= threshold:
+                background_run += 1
+                if background_run >= background_needed:
+                    end = j - background_run + 1
+                    next_cursor = j + 1
+                    break
+            else:
+                background_run = 0
+        run = vals[i0:end]
+        if len(run) >= 3:
+            steady = float(np.percentile(run, 90))
+            strength = steady - baseline
+            if strength >= minimum_contrast:
+                if weak_candidate is not None:
+                    _, _, weak_end = weak_candidate
+                    if (i0 - weak_end) * step > 4.0:
+                        i0, steady, _ = weak_candidate
+                        break
+                if strength >= minimum_contrast * 3.0:
+                    break
+                if weak_candidate is None:
+                    weak_candidate = (i0, steady, end)
+                else:
+                    weak_candidate = (
+                        weak_candidate[0],
+                        weak_candidate[1],
+                        end,
+                    )
+        if next_cursor >= len(vals):
+            if weak_candidate is None:
+                return None
+            i0, steady, _ = weak_candidate
+            break
+        if weak_candidate is not None and (next_cursor - weak_candidate[2]) * step > 4.0:
+            i0, steady, _ = weak_candidate
+            break
+        cursor = next_cursor
+
+    half = baseline + (steady - baseline) / 2.0
+    peak_index = i0 + int(np.argmax(run))
+    for i in range(max(i0 - int(3.0 / step), 0), peak_index):
         if vals[i] < half <= vals[i + 1]:
             return float(ts[i] + (half - vals[i]) / (vals[i + 1] - vals[i]) * step)
     return None
@@ -100,10 +233,11 @@ def edge_samples(
 
     Rays are cast perpendicular to the edge from whichever side reads as
     background, so this works for outer silhouettes and counters alike.
-    `offset` must land clear of the edge in that background; endpoints are
-    skipped (t0/t1) because corners bend the boundary. Returns an (n, 2)
-    array of SVG-space points, which may be shorter than `count` where a
-    ray found no clean transition.
+    `offset` is the maximum search distance. The actual start stays in the
+    connected background corridor, so a nearby component cannot steal the
+    scan. Endpoints are skipped (t0/t1) because corners bend the boundary.
+    Returns an (n, 2) array, which may be shorter than `count` where a ray
+    found no clean transition.
     """
     a, b = np.array(p0, float), np.array(p1, float)
     v = b - a
@@ -111,11 +245,19 @@ def edge_samples(
     d = v / length
     nrm = np.array([-d[1], d[0]])
     mid = a + v / 2
-    side = 1.0 if field.at(*(mid + nrm * offset)) < field.at(*(mid - nrm * offset)) else -1.0
+    plus = _background_offset(field, mid, nrm, offset)
+    minus = _background_offset(field, mid, -nrm, offset)
+    if plus is None and minus is None:
+        return np.empty((0, 2), dtype=np.float64)
+    side = 1.0 if (plus or 0.0) >= (minus or 0.0) else -1.0
     pts = []
     for t in np.linspace(t0, t1, count):
-        start = a + d * (t * length) + nrm * (side * offset)
-        hit = edge_point(field, tuple(start), tuple(-nrm * side), offset * 2.4)
+        edge = a + d * (t * length)
+        actual = _background_offset(field, edge, nrm * side, offset)
+        if actual is None:
+            continue
+        start = edge + nrm * (side * actual)
+        hit = edge_point(field, tuple(start), tuple(-nrm * side), actual + 10.0)
         if hit is not None:
             pts.append(hit)
     return np.array(pts, dtype=np.float64)
@@ -133,7 +275,9 @@ def subpixel_contour(
     free-form counterpart and the starting point for any curved work. The
     integer boundary is traced, a local tangent is estimated over +/-`smooth`
     points, and each point is re-found along its own normal by scanning from
-    the background side inward.
+    the background side inward. `offset` is a maximum: each scan starts at
+    the farthest point in the connected background corridor before another
+    component or the image edge.
 
     Where no clean transition is found — typically at a sharp concave corner,
     where the estimated normal points along the boundary rather than across
@@ -161,8 +305,17 @@ def subpixel_contour(
             continue
         t /= norm
         nrm = np.array([t[1], -t[0]]) * sign      # outward
-        start = raw[i] + nrm * offset
-        hit = edge_point(field, tuple(start), tuple(-nrm), offset * 2.4)
+        actual = _background_offset(field, raw[i], nrm, offset)
+        hit = None
+        if actual is not None:
+            start = raw[i] + nrm * actual
+            hit = edge_point(field, tuple(start), tuple(-nrm), actual + 10.0)
+            # A traced pixel is at most about one pixel from its real edge.
+            # A farther result belongs to unrelated geometry along a bad
+            # corner normal, so keep the traced point instead.
+            raw_svg = raw[i] + INDEX_TO_SVG
+            if hit is not None and np.linalg.norm(np.asarray(hit) - raw_svg) > 2.0:
+                hit = None
         if hit is None:
             hit = (raw[i][0] + INDEX_TO_SVG, raw[i][1] + INDEX_TO_SVG)
         out.append(hit)

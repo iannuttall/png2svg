@@ -13,7 +13,7 @@
 
 Copy this next to your work, edit the marked sections, run it with
 `uv run --no-project build_<name>.py`. It writes `<project>/project.json`
-directly — measurement and model in one pass, since the library does the
+directly; measurement and model in one pass, since the library does the
 measuring.
 
 The shape of the job is always the same:
@@ -25,9 +25,8 @@ The shape of the job is always the same:
 
 Steps 1 and 4 are the reconstruction. Steps 2 and 3 are calls.
 
-Read references/conventions.md first. The rule that costs the most hours:
-scan rays must START IN BACKGROUND — and a light counter inside dark ink is
-background too.
+Read references/conventions.md first. Scan rays still need background, but
+the contour helper now picks a safe start before a nearby component.
 """
 
 import json
@@ -65,7 +64,7 @@ sys.path.insert(0, str(_find_skill() / "scripts"))
 
 from png2svg import primitives as prim                           # noqa: E402
 from png2svg.compare import foreground_mask                      # noqa: E402
-from png2svg.geom import rounded_polygon, smooth_polygon  # noqa: E402,F401
+from png2svg.geom import smooth_polygon                   # noqa: E402,F401
 from png2svg.measure import (                                    # noqa: E402
     Field, subpixel_contour,
     edge_samples, fit_line, intersect,        # noqa: F401  hand measurement
@@ -77,6 +76,7 @@ from png2svg.outline import (                                    # noqa: E402
 )
 from png2svg.paint import (                                      # noqa: E402
     fit_linear_gradient, flat_colour, fit_shared_ramp,  # noqa: F401
+    map_ramp,                                           # noqa: F401
 )
 
 # ==== EDIT: project =========================================================
@@ -98,7 +98,7 @@ mask = ndimage.binary_closing(foreground_mask(img, BG), np.ones((3, 3)))
 
 def path_of(region, label, tol=TOL, reverse=False):
     """Contour -> primitives -> verified constraints -> model segments."""
-    C = subpixel_contour(F, ndimage.binary_fill_holes(region), offset=9.0)
+    C = subpixel_contour(F, ndimage.binary_fill_holes(region))
     if reverse:                    # a counter must wind the opposite way
         C = C[::-1]
     prims = segment_outline(C, tol=tol)
@@ -117,7 +117,8 @@ def fit_primitives(contour, build, p0, trim=0.0):
     by-product -- bars, rects, discs, capsules, anything repeated.
 
     `build(p)` returns [(vertices, radius), ...] as a function of the parameter
-    vector; emit each with `rounded_polygon(vertices, radius)`. Symmetries
+    vector; emit all of them with `prim.paths(build(fit.params))`. A radius can
+    be one value or one value per corner. Symmetries
     delete parameters rather than merely constraining them: three rounded
     parallelograms with 180-degree symmetry came to eight numbers at 0.080px.
 
@@ -127,15 +128,15 @@ def fit_primitives(contour, build, p0, trim=0.0):
     """
     fit = prim.fit_union(contour, build, p0, trim=trim)
     print(f"  primitives: {fit.summary()}")
-    print(f"      worst: {[f'{e:+.2f}' for _, e in fit.worst(3)]}")
+    print(f"      worst: {fit.worst_points(3)}")
     return fit
 
 
 def paint_of(region, label, trim=0.0):
     """Gradient if the region varies along an axis, flat otherwise.
 
-    Pass trim when something is painted ON TOP of the fill — a shadow, a
-    glow, a watermark — or it will drag the whole fit toward itself.
+    Pass trim when something is painted ON TOP of the fill; a shadow, a
+    glow, a watermark; or it will drag the whole fit toward itself.
     """
     core = ndimage.distance_transform_edt(region) >= 4
     spread = float(np.asarray(rgb, float)[core].std(axis=0).mean()) if core.sum() > 200 else 0.0
@@ -161,6 +162,8 @@ def paint_of(region, label, trim=0.0):
 #     overlapping shapes, and the seam is the top shape's edge.
 #   - A duplicated shape carries its own gradient in its own local span; the
 #     tell is a colour JUMP where two copies meet. Use `fit_shared_ramp`.
+#   - When paint follows a bent shape, split it into straight and curved
+#     spans, then use `map_ramp(paint, start, end, global_ramp)` on each.
 #   - Where one shape hides under another, GROW it into the occluder before
 #     tracing (intersect with the occluder itself, never a dilated copy) so
 #     no background hairline shows at the join.
@@ -187,7 +190,7 @@ for name, region in regions.items():
 # segments from them.
 #
 # Every constraint you confirm removes a free parameter that was absorbing
-# noise. Every one you invent moves geometry that was already right — so
+# noise. Every one you invent moves geometry that was already right; so
 # check that the constrained fit beats the free one before keeping it.
 
 proj = load_project(PROJECT)

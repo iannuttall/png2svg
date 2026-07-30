@@ -36,12 +36,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 SEGMENT_ARITY = {"M": 2, "L": 2, "A": 7, "C": 6, "Q": 4, "Z": 0}
 PAINT_TYPES = {"solid", "linear", "radial", "conic"}
+XML_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]*$")
 
 
 class ModelError(ValueError):
@@ -49,6 +51,12 @@ class ModelError(ValueError):
 
 
 def validate_shape(shape: dict[str, Any]) -> None:
+    shape_id = shape.get("id")
+    if not isinstance(shape_id, str) or not XML_ID.fullmatch(shape_id):
+        raise ModelError(
+            f"shape id {shape_id!r} must be an XML-safe identifier "
+            "(start with a letter; then use letters, digits, '.', '_' and '-')"
+        )
     if shape.get("type") != "path":
         raise ModelError(f"shape {shape.get('id')!r}: only type 'path' is supported")
     d = shape.get("d")

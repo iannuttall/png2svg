@@ -21,7 +21,7 @@ can make for you.
 1.60, 33 nodes in one path, 998-byte export.
 
 A flat black P with a plug notched out of it. The first thing to establish
-was that the plug **opens at the bottom** — it is not a counter, so the whole
+was that the plug **opens at the bottom**; it is not a counter, so the whole
 mark is one contour. Tracing the filled mask and subtracting the mask itself
 finds holes; here there were none, which settled it in one command.
 
@@ -36,24 +36,24 @@ What the measurements revealed:
   the bowl is modelled as a type designer would draw it: two cubics with
   horizontal tangents at the flats and a vertical tangent at the right
   extreme, handle lengths free. Four anchor points, two segments.
-- **The prong caps had to be tangency-constrained** — see convention 4. The
+- **The prong caps had to be tangency-constrained**; see convention 4. The
   free fit gave r=9.612 against a half-width of 9.559, and the resulting SVG
   arc rendered a full pixel low. Forcing r to the half-width both fixed it
   and fitted better (rms 0.056 against 0.190).
 - **The plug tapers are S-cubics**: the body sides and the neck sides are all
   vertical, so each transition is one cubic with vertical tangents at both
-  ends — two free handle lengths and two endpoint positions.
+  ends; two free handle lengths and two endpoint positions.
 - **Fillet radii came from one scan each.** For a fillet of radius r between
   edges meeting at half-angle θ, the vertex-to-arc distance along the
   bisector is r/sin(θ) − r. Measure that distance and r follows. The mark
-  uses 3.6–4.9 on the stem, 7.1 on the plug body, 1.6–2.9 where the prongs
+  uses 3.6-4.9 on the stem, 7.1 on the plug body, 1.6-2.9 where the prongs
   meet it.
 
 The plug is a light region *inside* the ink, which inverts the scan
 direction: its rays start in the plug interior and run outward. Getting that
 backwards returns zero samples every time (convention 2).
 
-Note also that the first score was IoU 0.9938 with edge mean 0.344 — bad
+Note also that the first score was IoU 0.9938 with edge mean 0.344; bad
 enough to suggest a broken model, when the model was already correct. It was
 renderer quantisation. See the noise floors in
 [conventions.md](conventions.md) before rebuilding anything.
@@ -67,14 +67,14 @@ repository.
 775-byte export. Converged in one iteration.
 
 Four flat polygons, two colours, six rounded corners. Sides fell into two
-slope families (+0.45 / −0.424) — matching each measured side to its family
+slope families (+0.45 / −0.424); matching each measured side to its family
 was most of the work.
 
 The source carried a diagonal stock watermark. It was reconstructed **clean**
 and the watermark deliberately discarded, which is why p95 is elevated. That
 choice is recorded in the model notes. The watermark also fooled the
-automatic `analyse` pass — it fragmented straight edges into "curves" and
-pushed paint probes to `linear`/`complex` — so colours were sampled as
+automatic `analyse` pass; it fragmented straight edges into "curves" and
+pushed paint probes to `linear`/`complex`; so colours were sampled as
 medians of eroded interiors instead. Treat `analyse` output as a proposal.
 
 ## Occlusion: a ribbon behind a cylinder
@@ -83,8 +83,8 @@ medians of eroded interiors instead. Treat `analyse` output as a proposal.
 Script: `examples/build_r_model.py`, ~130 lines, almost all of it decisions.
 
 A ribbon spirals behind a cylinder, so it arrives as **three separate
-visible pieces**. No occlusion machinery was needed — each piece is its own
-region — but each is grown underneath the cylinder before tracing, and the
+visible pieces**. No occlusion machinery was needed; each piece is its own
+region; but each is grown underneath the cylinder before tracing, and the
 cylinder is painted last, so no hairline of background can show along a
 join. Grow into the occluder itself, never a dilated copy of it: a ribbon
 allowed past the cylinder's own edge hangs out over the background, which
@@ -92,8 +92,8 @@ costs far more than the seam it was avoiding.
 
 The cylinder's top face taught the other lesson. Traced, it came out ragged
 and dripping, because the blue/dark boundary is a soft colour transition
-*inside* the silhouette — no background to scan against, so the contour fell
-back to raw pixels. Fitted as the ellipse it obviously is, max residual
+*inside* the silhouette; no background to scan against, so the contour fell
+back to raw pixels. Fitted as the ellipse indicated by its boundary, max residual
 0.65px. When a boundary is internal, fit the shape rather than trace it.
 
 ## A gradient loop with a cap and a shadow
@@ -102,7 +102,7 @@ back to raw pixels. Fitted as the ellipse it obviously is, max residual
 `examples/build_q_model.py`.
 
 Three things made this one instructive. Its width looked constant (medial
-axis median 60.0) so it looked like a stroked path — but measured *per run*
+axis median 60.0) so it looked like a stroked path; but measured *per run*
 the widths were 58.9, 63.9 and 56.8, steady within each run and different
 between them. A single stroke would have been wrong by 3.5px. **Verify a
 width per run before believing it is a stroke.**
@@ -129,7 +129,7 @@ so per-pixel ΔE cannot be satisfied and chasing it would be chasing noise.
 
 Reconstructed: backdrop wash, dark shell, metal plate, screen, slot.
 Dropped deliberately, and recorded in the model notes: grain, brushed
-streaks, engraved text, the waveform. Outlines fitted at `tol=1.2px` — near
+streaks, engraved text, the waveform. Outlines fitted at `tol=1.2px`; near
 the texture scale, because fitting tighter than the grain fits the grain.
 
 Known remaining defects, since these are more useful than a clean-looking
@@ -144,13 +144,13 @@ the whole job: sample every edge, fit each as a line, take vertices from the
 intersections, then read the fitted angles for structure.
 
 Angles that collapse into a few families are the design grid confessing
-itself. When a frame is provably regular — say an outer and inner hexagon
-sharing a centre — fit it as **one** constrained system rather than edge by
+itself. When a frame is provably regular; say an outer and inner hexagon
+sharing a centre; fit it as **one** constrained system rather than edge by
 edge: with the edge normals known, `(Cx, Cy, apothem_out, apothem_in)` is a
 linear least-squares problem over all of that frame's samples at once, and it
 will fit tighter than any edge fitted alone.
 
-Then verify the coincidences before enforcing them — a vertex landing exactly
+Then verify the coincidences before enforcing them; a vertex landing exactly
 on another shape's edge, or on the frame's centre, is a real constraint worth
 keeping. Leave anything that does not survive the check free: forcing two
 near-parallel diagonals onto the grid can cost more than it saves.
@@ -163,20 +163,61 @@ colour variance, fit line segments per channel, and read the stop colours off
 the segment ends. Then refit the stop *positions* with the colours held
 fixed. Offsets that land exactly on 0.5, or an axis that passes precisely
 through the artwork's centre, are the designer's decisions rather than
-coincidences — and a palette whose channels repeat across stops is a good
+coincidences; and a palette whose channels repeat across stops is a good
 sign the fit found the real construction rather than a local minimum.
+
+## A gradient that follows an S
+
+A long S-shaped ribbon exposed the difference between paint in page
+coordinates and paint in travel coordinates. One horizontal gradient across
+the page made both bars run in the same direction and could not turn around
+the caps.
+
+The portable SVG construction is five local paint spans on two overlapping
+hook shapes:
+
+1. top linear bar, travelling right to left;
+2. conic left cap;
+3. middle linear bar, travelling left to right;
+4. conic right cap;
+5. bottom linear bar, travelling right to left.
+
+Each span gets its own start and end position in one global 0..1 ramp.
+`paint.map_ramp` converts the global knots into the fewest local stops for
+that span. A reversed bar uses `start > end`; the adjacent cap starts at
+the same global position, so its seam colour is identical by construction.
+
+This keeps the visual decision explicit. SVG still has no native
+gradient-along-path fill, and hiding this behind a global gradient or a
+one-shot reconstruction would make the turn direction impossible to inspect.
+The conic emitter shares one ramp definition across all wedges, avoiding
+repeated colour-stop markup.
+
+## Close components and mixed corner radii
+
+A detached bar sitting 7px from another component exposed a bad measurement
+assumption: the old fixed 9px contour offset started inside the neighbour and
+returned its edge. The resulting contour jumped 8px and expanded from 10
+plausible primitives to 94. Adaptive background corridors keep the same case
+continuous at every requested maximum offset tested.
+
+The same mark had an arrow-like polygon with rounded outer corners and sharp
+notches. Path emission already accepted `[r, 0, r, r, 0]`, but the fitter,
+raster mask and crop bounds accepted only one radius. That split
+representation forced manual geometry. Per-corner radii now pass unchanged
+through `fit_union`, `raster`, `ink_bounds` and `primitives.paths`.
 
 ## Overlapping primitives: a slanted "S" of three bars (1500x1125 WebP)
 
 The case where tracing is the wrong tool. Read it before reaching for
 `segment_outline` on anything that might be built from repeated shapes.
 
-The silhouette is a Z with two notches, ten straight runs and ten corners —
-`analyse` reports exactly that, and traced it costs around forty nodes. But
+The silhouette is a Z with two notches, ten straight runs and ten corners.
+`analyse` reports exactly that, and tracing it costs around forty nodes. But
 the corner radii it returns are the giveaway: four at ~17.0-17.4, two that fit
 as 122.7, and two at ~2.5. A designer does not use five radii on one outline.
 The 122.7 pair were shallow corners measured with too wide a window
-(convention 3), and the ~2.5 pair were not corners at all — they were the
+(convention 3), and the ~2.5 pair were not corners at all; they were the
 points where two shapes cross.
 
 Three tells said "overlapping primitives", and any one would have been enough:
@@ -200,8 +241,8 @@ a separate flat fill.
     P2  = [cx-b, cx+b   ] x [cy-g, cy+g]     = pink lower + cyan upper
     Lo' = [cx+a-2b, cx+a] x [cy-k, cy+g]     cyan lower
 
-Eight numbers — slant `128.39244`, centre, `a`, `b`, `g`, `k`, radius
-`17.2655` — fixed all of it via `primitives.fit_union` against 2087 contour
+Eight numbers; slant `128.39244`, centre, `a`, `b`, `g`, `k`, radius
+`17.2655`; fixed all of it via `primitives.fit_union` against 2087 contour
 points: **mean 0.080px, p95 0.221px**. The band offset (`a - b` = 143.049) and
 each short rect's width (`2b`) fell out of the symmetry; both had been measured
 independently first, and their agreement to 0.02px is what confirmed the
@@ -214,7 +255,7 @@ Three things this mark taught that generalise:
    corner of one of the four band rects. So all twelve of its fillets are the
    artwork's own `r`; none had to be invented for an intersection.
 2. **Each parallelogram carries its own ramp.** There is a hard colour jump at
-   the seam tip — the upper rect ends `#fd30f8` where the lower restarts
+   the seam tip; the upper rect ends `#fd30f8` where the lower restarts
    `#fc59e9`. Four gradients, not two, and the two rects of a band share one
    ramp in local y (`paint.fit_shared_ramp`, rms 1.7 pooled).
 3. **The blue overlap is flat**, at `#4548e9` with a spread of 0.8. Worth
@@ -224,5 +265,5 @@ Three things this mark taught that generalise:
 Final: IoU 0.9988, edge mean 0.081px, ΔE mean 0.91, p95 2.52, at 63 nodes and
 2.8KB. The ΔE max of 58.9 is a "logo for sale" watermark badge that was
 deliberately not reconstructed, and the rest of the residual is the source's
-own sharpening ringing — it undershoots to `(200,89,181)` one pixel inside
+own sharpening ringing; it undershoots to `(200,89,181)` one pixel inside
 edges, darker than either side, which no clean vector can or should match.

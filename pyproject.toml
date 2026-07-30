@@ -1,7 +1,7 @@
 [project]
 name = "png2svg"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "Deterministic measurement and SVG reconstruction tools for the png2svg skill"
 readme = "README.md"
 authors = [
     { name = "ian nuttall", email = "6681919+iannuttall@users.noreply.github.com" }

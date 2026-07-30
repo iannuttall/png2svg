@@ -14,6 +14,8 @@ Everything here returns paint dicts that drop straight into a model shape.
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 import numpy as np
 from scipy import ndimage, optimize
 
@@ -275,3 +277,103 @@ def fit_shared_ramp(rgb: np.ndarray, pieces, *, n_stops: int = 2,
         "rms": rms,
         "n": int(len(u)),
     }
+
+
+def _ramp_stop(stop) -> tuple[float, str, float]:
+    if isinstance(stop, dict):
+        return (
+            float(stop["offset"]),
+            stop["color"],
+            float(stop.get("opacity", 1.0)),
+        )
+    if len(stop) == 2:
+        return float(stop[0]), stop[1], 1.0
+    return float(stop[0]), stop[1], float(stop[2])
+
+
+def _rgb(color: str) -> tuple[int, int, int]:
+    value = color.lstrip("#")
+    if len(value) != 6:
+        raise ValueError("ramp colours must use #rrggbb")
+    return tuple(int(value[i : i + 2], 16) for i in (0, 2, 4))
+
+
+def sample_ramp(ramp, position: float) -> tuple[str, float]:
+    """sRGB colour and opacity at one position in a shared 0..1 ramp."""
+    stops = sorted((_ramp_stop(stop) for stop in ramp), key=lambda stop: stop[0])
+    return _sample_sorted_ramp(stops, float(position), side="right")
+
+
+def _sample_sorted_ramp(
+    stops: list[tuple[float, str, float]],
+    position: float,
+    *,
+    side: str,
+) -> tuple[str, float]:
+    """Sample one side of a possibly discontinuous, already sorted ramp."""
+    if len(stops) < 2:
+        raise ValueError("ramp needs at least two stops")
+    exact = [stop for stop in stops if abs(position - stop[0]) < 1e-12]
+    if exact:
+        chosen = exact[0] if side == "left" else exact[-1]
+        return chosen[1], chosen[2]
+    if position <= stops[0][0]:
+        return stops[0][1], stops[0][2]
+    if position >= stops[-1][0]:
+        return stops[-1][1], stops[-1][2]
+    for left, right in zip(stops, stops[1:]):
+        if right[0] == left[0]:
+            continue
+        if position <= right[0]:
+            amount = (position - left[0]) / (right[0] - left[0])
+            a, b = _rgb(left[1]), _rgb(right[1])
+            rgb = tuple(round(x + (y - x) * amount) for x, y in zip(a, b))
+            opacity = left[2] + (right[2] - left[2]) * amount
+            return "#{:02x}{:02x}{:02x}".format(*rgb), float(opacity)
+    raise AssertionError("unreachable")
+
+
+def ramp_segment(ramp, start: float, end: float) -> list[dict]:
+    """Minimal local stops for the slice `start..end` of a shared ramp.
+
+    This is the key primitive for paint that follows a bent shape. Each
+    straight or curved piece gets local offsets 0..1, while all colours come
+    from one global distance-along-the-shape ramp.
+    """
+    start, end = float(start), float(end)
+    if abs(end - start) < 1e-12:
+        raise ValueError("ramp segment start and end must differ")
+    global_stops = sorted((_ramp_stop(stop) for stop in ramp), key=lambda s: s[0])
+    low, high = sorted((start, end))
+    forward = end > start
+    colour, opacity = _sample_sorted_ramp(
+        global_stops, start, side="right" if forward else "left"
+    )
+    entries = [(start, colour, opacity)]
+    interior = [stop for stop in global_stops if low < stop[0] < high]
+    if not forward:
+        interior.reverse()
+    entries.extend(interior)
+    colour, opacity = _sample_sorted_ramp(
+        global_stops, end, side="left" if forward else "right"
+    )
+    entries.append((end, colour, opacity))
+    out = []
+    for position, color, opacity in entries:
+        stop = {
+            "offset": float(round((position - start) / (end - start), 8)),
+            "color": color,
+        }
+        if opacity != 1.0:
+            stop["opacity"] = float(round(opacity, 8))
+        out.append(stop)
+    return out
+
+
+def map_ramp(paint: dict, start: float, end: float, ramp) -> dict:
+    """Copy a linear, radial, or conic paint onto a shared ramp slice."""
+    if "stops" not in paint:
+        raise ValueError("only gradient paints can be mapped to a ramp")
+    result = deepcopy(paint)
+    result["stops"] = ramp_segment(ramp, start, end)
+    return result

@@ -13,9 +13,28 @@ from PIL import Image
 from . import compare as cmp
 from .model import Project, load_project, save_project, sha256_file
 from .render import RENDERER, render_svg
-from .svggen import generate_svg
+from .svggen import PROFILES, generate_svg, svg_stats, tight_view_box
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
+
+
+def _halo_free(rgba: np.ndarray, background: tuple[int, int, int], bright: bool) -> bool:
+    """Whether partial-alpha pixels carry colour instead of a baked halo.
+
+    A fully opaque SVG has no partial-alpha band and therefore no possible
+    transparency halo. Treat that as a passing, not empty, measurement.
+    """
+    arr = np.asarray(rgba, dtype=float)
+    alpha = arr[..., 3:] / 255.0
+    edge_band = (alpha[..., 0] > 0.02) & (alpha[..., 0] < 0.98)
+    if not edge_band.any():
+        return True
+    flat = arr[..., :3] * alpha + np.array(background) * (1 - alpha)
+    if bright:
+        fringe = float((flat[edge_band] > 250).all(axis=-1).mean())
+    else:
+        fringe = float((flat[edge_band] < 5).all(axis=-1).mean())
+    return fringe < 0.9
 
 
 def _estimate_background(img: Image.Image) -> list[int]:
@@ -253,21 +272,25 @@ def validate(project: Path = typer.Argument(..., exists=True, file_okay=False)) 
 
     # halo check: composite on hard backgrounds, look for bright/dark fringes
     img = render_svg(svg, proj.width, proj.height)
-    arr = np.asarray(img).astype(float)
-    alpha = arr[..., 3:] / 255.0
     for name, bgc in [("white", (255, 255, 255)), ("black", (0, 0, 0))]:
-        flat = arr[..., :3] * alpha + np.array(bgc) * (1 - alpha)
-        edge_band = (alpha[..., 0] > 0.02) & (alpha[..., 0] < 0.98)
-        if name == "white":
-            fringe = float((flat[edge_band] > 250).all(axis=-1).mean())
-        else:
-            fringe = float((flat[edge_band] < 5).all(axis=-1).mean())
-        checks[f"halo_free_on_{name}"] = fringe < 0.9  # partial pixels must carry colour
+        checks[f"halo_free_on_{name}"] = _halo_free(
+            np.asarray(img), bgc, bright=name == "white"
+        )
 
     # model complexity
     nodes = sum(len(s["d"]) for s in proj.shapes)
     checks["model_path_nodes"] = nodes
     checks["shapes"] = len(proj.shapes)
+    checks["semantic_svg"] = svg_stats(svg)
+    compact = generate_svg(proj, profile="compact")
+    animation = generate_svg(proj, profile="animation")
+    checks["compact_svg"] = svg_stats(compact)
+    checks["animation_svg"] = svg_stats(animation)
+    checks["all_profiles_deterministic"] = all(
+        generate_svg(load_project(project), profile=profile)
+        == generate_svg(proj, profile=profile)
+        for profile in PROFILES
+    )
 
     out = project / "validation-metrics.json"
     out.write_text(json.dumps(report, indent=2) + "\n")
@@ -282,10 +305,31 @@ def validate(project: Path = typer.Argument(..., exists=True, file_okay=False)) 
 def export(
     project: Path = typer.Argument(..., exists=True, file_okay=False),
     output: Path = typer.Option(..., "--output", "-o"),
+    profile: str = typer.Option(
+        "compact",
+        "--profile",
+        help="semantic, compact, or animation",
+    ),
+    tight: bool = typer.Option(
+        False,
+        "--tight",
+        help="crop the viewBox to model ink bounds",
+    ),
+    padding: float = typer.Option(
+        0.0,
+        "--padding",
+        min=0.0,
+        help="extra SVG units around a tight viewBox",
+    ),
 ) -> None:
     """Write the standalone SVG, verifying it is raster- and script-free."""
+    if profile not in PROFILES:
+        raise typer.BadParameter(f"profile must be one of {', '.join(PROFILES)}")
+    if padding and not tight:
+        raise typer.BadParameter("--padding requires --tight")
     proj = load_project(project)
-    svg = generate_svg(proj)
+    view_box = tight_view_box(proj, padding) if tight else None
+    svg = generate_svg(proj, profile=profile, view_box=view_box)
     import xml.etree.ElementTree as ET
 
     root = ET.fromstring(svg)
@@ -296,8 +340,17 @@ def export(
     ]
     if bad:
         raise typer.Exit(f"export blocked: contains {bad}")
+    external = [
+        value
+        for element in root.iter()
+        for key, value in element.attrib.items()
+        if key.endswith("href") and not value.startswith("#")
+    ]
+    if external:
+        raise typer.Exit(f"export blocked: contains external references {external}")
     output.write_text(svg)
-    typer.echo(f"wrote {output} ({len(svg)} bytes)")
+    crop = f", viewBox={view_box}" if view_box else ""
+    typer.echo(f"wrote {output} ({len(svg)} bytes, profile={profile}{crop})")
 
 
 if __name__ == "__main__":

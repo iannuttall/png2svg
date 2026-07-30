@@ -1,17 +1,22 @@
 """Deterministic SVG generation from the project model.
 
 Output is stable byte-for-byte for an unchanged model: fixed attribute
-order, fixed float formatting, ids derived from shape ids and layer index.
-Conic paints are compiled to clipped wedge fans of linear gradients since
-SVG has no native conic gradient.
+order, fixed float formatting and short internal ids from a reserved
+namespace. Semantic shape ids stay stable DOM targets. Conic paints are
+compiled to clipped wedge fans of linear gradients since SVG has no native
+conic gradient.
 """
 
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
+from .geom import path_bounds
 from .model import Project
+
+PROFILES = ("semantic", "compact", "animation")
 
 
 def fmt(x: float) -> str:
@@ -20,8 +25,10 @@ def fmt(x: float) -> str:
     return "0" if s in ("-0", "") else s
 
 
-def path_data(segments: list[list[Any]]) -> str:
+def path_data(segments: list[list[Any]], compact: bool = False) -> str:
     parts = []
+    current: tuple[float, float] | None = None
+    start: tuple[float, float] | None = None
     for seg in segments:
         cmd = seg[0]
         if cmd == "A":
@@ -29,10 +36,30 @@ def path_data(segments: list[list[Any]]) -> str:
             parts.append(
                 f"A{fmt(rx)} {fmt(ry)} {fmt(rot)} {int(laf)} {int(sf)} {fmt(x)} {fmt(y)}"
             )
+            current = (float(x), float(y))
         elif cmd == "Z":
             parts.append("Z")
+            current = start
         else:
-            parts.append(cmd + " ".join(fmt(v) for v in seg[1:]))
+            values = [float(v) for v in seg[1:]]
+            if compact and cmd == "L" and current is not None:
+                if abs(values[1] - current[1]) < 1e-12:
+                    parts.append("H" + fmt(values[0]))
+                elif abs(values[0] - current[0]) < 1e-12:
+                    parts.append("V" + fmt(values[1]))
+                else:
+                    parts.append("L" + " ".join(fmt(v) for v in values))
+            else:
+                parts.append(cmd + " ".join(fmt(v) for v in values))
+            if cmd == "M":
+                current = (values[0], values[1])
+                start = current
+            elif cmd == "L":
+                current = (values[0], values[1])
+            elif cmd == "Q":
+                current = (values[2], values[3])
+            elif cmd == "C":
+                current = (values[4], values[5])
     return " ".join(parts)
 
 
@@ -95,6 +122,12 @@ def _conic_svg(pid: str, paint: dict[str, Any], defs: list[str], body: list[str]
     n = int(paint.get("wedges", 16))
     opacity = float(paint.get("opacity", 1.0))
     op_attr = f' opacity="{fmt(opacity)}"' if opacity != 1.0 else ""
+    base_id = f"{pid}r"
+    defs.append(
+        f'<linearGradient id="{base_id}">\n'
+        + _stops_svg(paint["stops"], "  ")
+        + "\n</linearGradient>"
+    )
     body.append(f"<g{op_attr}>")
     # small pie under the fan: the wedge vertices are degenerate at the
     # centre and antialiasing can leave a pinhole there; the pie spans only
@@ -118,18 +151,18 @@ def _conic_svg(pid: str, paint: dict[str, Any], defs: list[str], body: list[str]
         r_mid = radius * 0.66
         gx0, gy0 = cx + r_mid * math.cos(a0), cy + r_mid * math.sin(a0)
         gx1, gy1 = cx + r_mid * math.cos(a1), cy + r_mid * math.sin(a1)
-        c0, o0 = _interp_color(paint["stops"], t0)
-        c1, o1 = _interp_color(paint["stops"], t1)
-        gid = f"{pid}-w{i}"
+        # Reuse one full ramp for every wedge. Extending the wedge chord so
+        # its endpoints land at global ramp positions t0/t1 gives the exact
+        # local slice without repeating two colour stops in every definition.
+        span = t1 - t0
+        dx, dy = (gx1 - gx0) / span, (gy1 - gy0) / span
+        full_x0, full_y0 = gx0 - dx * t0, gy0 - dy * t0
+        full_x1, full_y1 = full_x0 + dx, full_y0 + dy
+        gid = f"{pid}w{i:x}"
         defs.append(
-            f'<linearGradient id="{gid}" gradientUnits="userSpaceOnUse" '
-            f'x1="{fmt(gx0)}" y1="{fmt(gy0)}" x2="{fmt(gx1)}" y2="{fmt(gy1)}">\n'
-            f'  <stop offset="0" stop-color="{c0}"'
-            + (f' stop-opacity="{fmt(o0)}"' if o0 != 1.0 else "")
-            + '/>\n'
-            f'  <stop offset="1" stop-color="{c1}"'
-            + (f' stop-opacity="{fmt(o1)}"' if o1 != 1.0 else "")
-            + "/>\n</linearGradient>"
+            f'<linearGradient id="{gid}" href="#{base_id}" '
+            f'gradientUnits="userSpaceOnUse" x1="{fmt(full_x0)}" '
+            f'y1="{fmt(full_y0)}" x2="{fmt(full_x1)}" y2="{fmt(full_y1)}"/>'
         )
         # Stroke each wedge with its own gradient: two abutting antialiased
         # edges composite to less than full alpha (1-(1-a)(1-b)), so unstroked
@@ -163,15 +196,16 @@ def _gradient_def(pid: str, paint: dict[str, Any]) -> str:
     )
 
 
-def _stroke_svg(sid: str, d: str, stroke: dict[str, Any], defs: list[str]) -> str:
+def _stroke_svg(
+    gradient_id: str, d: str, stroke: dict[str, Any], defs: list[str]
+) -> str:
     """A stroked outline, painted after the fills and outside any clip."""
     paint = stroke["paint"]
     if paint["type"] == "solid":
         value = paint["color"]
     else:
-        pid = f"{sid}-s"
-        defs.append(_gradient_def(pid, paint))
-        value = f"url(#{pid})"
+        defs.append(_gradient_def(gradient_id, paint))
+        value = f"url(#{gradient_id})"
     attrs = [f'stroke="{value}"', f'stroke-width="{fmt(stroke["width"])}"']
     if "linecap" in stroke:
         attrs.append(f'stroke-linecap="{stroke["linecap"]}"')
@@ -183,14 +217,22 @@ def _stroke_svg(sid: str, d: str, stroke: dict[str, Any], defs: list[str]) -> st
     return f'<path d="{d}" fill="none" {" ".join(attrs)}/>'
 
 
-def _layer_target(d: str, fill: str, op_attr: str, li: int, paint: dict, vb: list) -> str:
+def _layer_target(
+    d: str,
+    fill: str,
+    op_attr: str,
+    li: int,
+    paint: dict,
+    vb: list,
+    fill_rule: str,
+) -> str:
     """The element a fill layer paints: the shape path for the base layer,
     a bounded rect for overlays (clipped to the shape by the enclosing group).
     A paint's optional "rect": [x, y, w, h] restricts the layer's region."""
     if "rect" in paint:
         x, y, w, h = paint["rect"]
     elif li == 0:
-        return f'  <path d="{d}" fill="{fill}"{op_attr}/>'
+        return f'  <path d="{d}" fill="{fill}"{fill_rule}{op_attr}/>'
     else:
         x, y, w, h = vb
     return (
@@ -199,14 +241,62 @@ def _layer_target(d: str, fill: str, op_attr: str, li: int, paint: dict, vb: lis
     )
 
 
-def generate_svg(project: Project) -> str:
-    vb = project.view_box or [0, 0, project.width, project.height]
+def tight_view_box(project: Project, padding: float = 0.0) -> list[float]:
+    """Bounds of all model paths as `[x, y, width, height]`."""
+    if not project.shapes:
+        raise ValueError("cannot crop a project with no shapes")
+    x0 = y0 = math.inf
+    x1 = y1 = -math.inf
+    for shape in project.shapes:
+        stroke = shape.get("stroke")
+        stroke_width = 0.0
+        if stroke is not None:
+            width = float(stroke["width"])
+            # SVG's default miterlimit can extend a sharp join to four
+            # half-widths. Round and bevel joins need only half a width.
+            stroke_width = width * 4.0 if stroke.get("linejoin", "miter") == "miter" else width
+        bx0, by0, bx1, by1 = path_bounds(shape["d"], stroke_width)
+        x0, y0 = min(x0, bx0), min(y0, by0)
+        x1, y1 = max(x1, bx1), max(y1, by1)
+    pad = max(0.0, float(padding))
+    return [x0 - pad, y0 - pad, x1 - x0 + 2 * pad, y1 - y0 + 2 * pad]
+
+
+def svg_stats(svg: str) -> dict[str, int]:
+    """Small deterministic complexity report for an emitted SVG."""
+    return {
+        "bytes": len(svg.encode()),
+        "elements": len(re.findall(r"<(?!/|!)[A-Za-z]", svg)),
+        "paths": svg.count("<path"),
+        "groups": svg.count("<g"),
+        "defs": svg.count("<defs"),
+        "gradients": svg.count("<linearGradient") + svg.count("<radialGradient"),
+    }
+
+
+def generate_svg(
+    project: Project,
+    *,
+    profile: str = "semantic",
+    view_box: list[float] | None = None,
+) -> str:
+    """Generate stable SVG for editing, compact delivery, or animation.
+
+    `semantic` puts each logical shape id on its path or wrapper. `animation`
+    always gives every logical shape a stable group. `compact` removes those
+    authoring ids and whitespace while retaining ids required by SVG defs.
+    """
+    if profile not in PROFILES:
+        raise ValueError(f"profile must be one of {', '.join(PROFILES)}")
+    project.validate()
+    vb = view_box or project.view_box or [0, 0, project.width, project.height]
     defs: list[str] = []
     body: list[str] = []
+    gradient_serial = 0
 
-    for shape in project.shapes:
+    for shape_index, shape in enumerate(project.shapes):
         sid = shape["id"]
-        d = path_data(shape["d"])
+        d = path_data(shape["d"], compact=profile == "compact")
         # evenodd lets a compound path carry a real hole without relying on
         # subpath winding — the only way to cut a shape that stays a hole
         # when the artwork is recoloured or composited on anything else
@@ -215,43 +305,87 @@ def generate_svg(project: Project) -> str:
         clip_needed = len(shape["fills"]) > 1 or any(
             f["type"] == "conic" for f in shape["fills"]
         )
+        outer_group = profile == "animation" or (
+            profile == "semantic" and (clip_needed or shape.get("stroke") is not None)
+        )
+        if outer_group:
+            body.append(f'<g id="{sid}">')
         if clip_needed:
-            defs.append(f'<clipPath id="clip-{sid}">\n  <path d="{d}"/>\n</clipPath>')
-            body.append(f'<g clip-path="url(#clip-{sid})">')
+            clip_id = f"_c{shape_index:x}"
+            clip_rule = f' clip-rule="{rule}"' if rule != "nonzero" else ""
+            defs.append(
+                f'<clipPath id="{clip_id}">\n'
+                f'  <path d="{d}"{clip_rule}/>\n</clipPath>'
+            )
+            body.append(f'<g clip-path="url(#{clip_id})">')
         for li, paint in enumerate(shape["fills"]):
-            pid = f"{sid}-p{li}"
             ptype = paint["type"]
+            if ptype == "solid":
+                pid = ""
+            else:
+                pid = f"_g{gradient_serial:x}"
+                gradient_serial += 1
             opacity = float(paint.get("opacity", 1.0))
             op_attr = f' fill-opacity="{fmt(opacity)}"' if opacity != 1.0 else ""
             if ptype == "solid":
                 fill = paint["color"]
                 if clip_needed:
-                    body.append(_layer_target(d, fill, op_attr, li, paint, vb))
+                    body.append(_layer_target(d, fill, op_attr, li, paint, vb, fr))
                 else:
-                    body.append(f'<path d="{d}" fill="{fill}"{fr}{op_attr}/>')
+                    id_attr = (
+                        f' id="{sid}"'
+                        if profile == "semantic" and not outer_group
+                        else ""
+                    )
+                    body.append(f'<path{id_attr} d="{d}" fill="{fill}"{fr}{op_attr}/>')
             elif ptype in ("linear", "radial"):
                 defs.append(_gradient_def(pid, paint))
                 fill = f"url(#{pid})"
                 if clip_needed:
-                    body.append(_layer_target(d, fill, op_attr, li, paint, vb))
+                    body.append(_layer_target(d, fill, op_attr, li, paint, vb, fr))
                 else:
-                    body.append(f'<path d="{d}" fill="{fill}"{fr}{op_attr}/>')
+                    id_attr = (
+                        f' id="{sid}"'
+                        if profile == "semantic" and not outer_group
+                        else ""
+                    )
+                    body.append(f'<path{id_attr} d="{d}" fill="{fill}"{fr}{op_attr}/>')
             elif ptype == "conic":
                 _conic_svg(pid, paint, defs, body)
         if clip_needed:
             body.append("</g>")
         if shape.get("stroke"):
-            body.append(_stroke_svg(sid, d, shape["stroke"], defs))
+            stroke_gradient_id = ""
+            if shape["stroke"]["paint"]["type"] != "solid":
+                stroke_gradient_id = f"_g{gradient_serial:x}"
+                gradient_serial += 1
+            body.append(
+                _stroke_svg(stroke_gradient_id, d, shape["stroke"], defs)
+            )
+        if outer_group:
+            body.append("</g>")
 
-    lines = [
+    root = (
         '<svg xmlns="http://www.w3.org/2000/svg" '
-        f'viewBox="{fmt(vb[0])} {fmt(vb[1])} {fmt(vb[2])} {fmt(vb[3])}" '
-        f'width="{fmt(vb[2])}" height="{fmt(vb[3])}">'
-    ]
+        f'viewBox="{fmt(vb[0])} {fmt(vb[1])} {fmt(vb[2])} {fmt(vb[3])}"'
+    )
+    if profile != "compact":
+        root += f' width="{fmt(vb[2])}" height="{fmt(vb[3])}"'
+    lines = [root + ">"]
     if defs:
         lines.append("<defs>")
         lines.extend(defs)
         lines.append("</defs>")
     lines.extend(body)
     lines.append("</svg>")
-    return "\n".join(lines) + "\n"
+    svg = "\n".join(lines) + "\n"
+    if profile == "compact":
+        svg = re.sub(r">\s+<", "><", svg).strip() + "\n"
+        svg = re.sub(
+            r"#([0-9a-fA-F])\1([0-9a-fA-F])\2([0-9a-fA-F])\3(?=\")",
+            lambda match: "#" + match.group(1) + match.group(2) + match.group(3),
+            svg,
+        )
+        svg = re.sub(r'([= "\'])0\.', r"\1.", svg)
+        svg = re.sub(r'([= "\'])-0\.', r"\1-.", svg)
+    return svg

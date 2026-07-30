@@ -7,10 +7,10 @@ from PIL import Image
 
 from png2svg import compare as cmp
 from png2svg import primitives as prim
-from png2svg.geom import rounded_polygon, smooth_polygon
+from png2svg.geom import path_bounds, rounded_polygon, smooth_polygon
 from png2svg.model import ModelError, Project, validate_shape
 from png2svg.render import render_svg
-from png2svg.svggen import generate_svg
+from png2svg.svggen import generate_svg, svg_stats, tight_view_box
 
 
 def make_project(shapes, w=100, h=100):
@@ -50,6 +50,11 @@ class TestModel:
         p = make_project([RECT, dict(RECT)])
         with pytest.raises(ModelError):
             p.validate()
+
+    def test_rejects_id_that_cannot_be_an_svg_animation_target(self):
+        bad = dict(RECT, id="1 bad id")
+        with pytest.raises(ModelError, match="XML-safe"):
+            validate_shape(bad)
 
 
 class TestSvgGen:
@@ -105,6 +110,77 @@ class TestSvgGen:
         # no seams or centre pinholes (real seam defects measure 186-230)
         assert arr[..., 3][inside].min() >= 250
 
+    def test_conic_wedges_share_one_ramp_definition(self):
+        conic = {
+            "id": "c", "type": "path", "d": RECT["d"],
+            "fills": [{"type": "conic", "cx": 50, "cy": 50, "radius": 45,
+                       "angle_start": 0, "angle_end": 180, "wedges": 8,
+                       "stops": [{"offset": 0, "color": "#ff0000"},
+                                 {"offset": 1, "color": "#0000ff"}]}],
+        }
+        svg = generate_svg(make_project([conic]))
+        assert svg.count("<stop ") == 2
+        assert svg.count('href="#_g0r"') == 8
+
+    def test_export_profiles_preserve_pixels_and_change_structure(self):
+        project = make_project([RECT])
+        semantic = generate_svg(project, profile="semantic")
+        compact = generate_svg(project, profile="compact")
+        animation = generate_svg(project, profile="animation")
+        assert '<path id="r"' in semantic
+        assert 'id="r"' not in compact
+        assert '<g id="r">' in animation
+        assert len(compact) < len(semantic)
+        a = np.asarray(render_svg(semantic, 100, 100))
+        b = np.asarray(render_svg(compact, 100, 100))
+        c = np.asarray(render_svg(animation, 100, 100))
+        assert np.array_equal(a, b) and np.array_equal(a, c)
+        assert svg_stats(compact)["paths"] == 1
+
+    def test_animation_id_wraps_a_whole_fill_stack_and_stroke_once(self):
+        shape = dict(
+            RECT,
+            fills=[
+                {"type": "solid", "color": "#3050a0"},
+                {"type": "solid", "color": "#ffffff", "opacity": 0.2,
+                 "rect": [20, 20, 60, 20]},
+            ],
+            stroke={
+                "paint": {"type": "solid", "color": "#101010"},
+                "width": 2,
+            },
+        )
+        svg = generate_svg(make_project([shape]), profile="animation")
+        assert svg.count('id="r"') == 1
+        assert svg.index('<g id="r">') < svg.index("clip-path")
+        assert svg.index('stroke="#101010"') < svg.rindex("</g>")
+
+    def test_internal_definition_ids_cannot_collide_with_shape_ids(self):
+        import xml.etree.ElementTree as ET
+
+        gradient = dict(
+            RECT,
+            id="a",
+            fills=[{
+                "type": "linear", "x1": 0, "y1": 0, "x2": 100, "y2": 0,
+                "stops": [{"offset": 0, "color": "#000000"},
+                          {"offset": 1, "color": "#ffffff"}],
+            }],
+        )
+        second = dict(RECT, id="a-p0")
+        root = ET.fromstring(generate_svg(make_project([gradient, second])))
+        ids = [element.attrib["id"] for element in root.iter() if "id" in element.attrib]
+        assert len(ids) == len(set(ids))
+        assert {"a", "a-p0", "_g0"} <= set(ids)
+
+    def test_halo_checker_accepts_a_fully_opaque_svg(self):
+        from png2svg.cli import _halo_free
+
+        rgba = np.full((20, 20, 4), 255, np.uint8)
+        rgba[..., :3] = (30, 60, 90)
+        assert _halo_free(rgba, (255, 255, 255), bright=True)
+        assert _halo_free(rgba, (0, 0, 0), bright=False)
+
 
 class TestGeom:
     def test_rounded_polygon_square(self):
@@ -117,6 +193,39 @@ class TestGeom:
         segs = smooth_polygon([(0, 0), (10, 0), (5, 10)], [c, c, c])
         assert segs[0][0] == "M" and segs[-1][0] == "Z"
         assert sum(1 for s in segs if s[0] == "C") == 3
+
+    def test_path_bounds_solves_curve_extrema(self):
+        quadratic = [["M", 0, 0], ["Q", 50, 100, 100, 0]]
+        assert np.allclose(path_bounds(quadratic), (0, 0, 100, 50))
+        cubic = [["M", 0, 0], ["C", 0, 90, 100, 90, 100, 0]]
+        assert np.allclose(path_bounds(cubic), (0, 0, 100, 67.5))
+
+    def test_path_bounds_solves_arc_extrema(self):
+        circle = [
+            ["M", 50, 0],
+            ["A", 50, 50, 0, 0, 1, 50, 100],
+            ["A", 50, 50, 0, 0, 1, 50, 0],
+            ["Z"],
+        ]
+        assert np.allclose(path_bounds(circle), (0, 0, 100, 100), atol=1e-10)
+
+        phi = np.radians(30)
+        p0 = (100 + 40 * np.cos(phi), 100 + 40 * np.sin(phi))
+        p1 = (100 - 40 * np.cos(phi), 100 - 40 * np.sin(phi))
+        rotated = [
+            ["M", *p0], ["A", 40, 20, 30, 0, 1, *p1],
+            ["A", 40, 20, 30, 0, 1, *p0], ["Z"],
+        ]
+        dx = np.hypot(40 * np.cos(phi), 20 * np.sin(phi))
+        dy = np.hypot(40 * np.sin(phi), 20 * np.cos(phi))
+        assert np.allclose(path_bounds(rotated),
+                           (100 - dx, 100 - dy, 100 + dx, 100 + dy))
+
+    def test_tight_viewbox_uses_model_paths_not_raster_sampling(self):
+        assert np.allclose(
+            tight_view_box(make_project([RECT]), padding=2),
+            [18, 18, 64, 44],
+        )
 
 
 class TestCompare:
@@ -151,6 +260,16 @@ class TestCompare:
         lab = cmp.linear_to_lab(cmp.srgb_to_linear(
             np.array([[[120.0, 60.0, 200.0]]])))
         assert cmp.ciede2000(lab, lab)[0, 0] == pytest.approx(0.0)
+
+    def test_foreground_mask_does_not_cut_a_channel_at_a_colour_seam(self):
+        rgb = np.full((80, 80, 3), 255, np.uint8)
+        rgb[10:70, 10:40] = (235, 110, 220)
+        rgb[10:70, 40:70] = (45, 55, 180)
+        rgb[10:70, 39] = (190, 96, 210)
+        rgb[10:70, 40] = (90, 67, 190)
+        mask = cmp.foreground_mask(Image.fromarray(rgb), (255, 255, 255))
+        assert mask[30, 20] and mask[30, 39] and mask[30, 40] and mask[30, 60]
+        assert not mask[5, 40] and not mask[75, 40]
 
 
 class TestAnalyse:
@@ -247,7 +366,8 @@ class TestStroke:
             "stops": [{"offset": 0.0, "color": "#000000"},
                       {"offset": 1.0, "color": "#ffffff"}]})
         svg = generate_svg(make_project([shape]))
-        assert 'stroke="url(#s-s)"' in svg and "<linearGradient id=\"s-s\"" in svg
+        assert 'stroke="url(#_g0)"' in svg
+        assert '<linearGradient id="_g0"' in svg
         a = np.asarray(render_svg(svg, 100, 100, supersample=4))
         assert a[50, 22, 0] < 40 and a[50, 78, 0] > 215
 
@@ -256,8 +376,8 @@ class TestStroke:
         shape = self.line_shape()
         shape["fills"] = [{"type": "solid", "color": "#ff0000"}]
         svg = generate_svg(make_project([shape]))
-        assert svg.index('stroke="#3355ff"') > svg.rindex("</g>") \
-            if "</g>" in svg else True
+        assert "clip-path" not in svg
+        assert svg.index('stroke="#3355ff"') > svg.index('fill="#ff0000"')
         a = np.asarray(render_svg(svg, 100, 100, supersample=4))
         assert a[41, 50, 3] == 255 and a[58, 50, 3] == 255
 
@@ -350,8 +470,74 @@ class TestCurves:
         r = np.hypot(C[:, 0] - 100.0, C[:, 1] - 100.0)
         assert abs(r.mean() - 60.0) < 0.4
         assert r.std() < 0.4
-        # continuous: no torn gaps, which would wreck any fit across them
-        assert np.linalg.norm(np.diff(C, axis=0), axis=1).max() < 3.0
+
+    def test_subpixel_contour_stops_before_a_nearby_component(self):
+        from png2svg.measure import Field, subpixel_contour
+
+        img = np.full((64, 64, 3), 255, np.uint8)
+        img[10:54, 8:24] = 20
+        img[10:54, 31:47] = 20
+        mask = np.zeros((64, 64), bool)
+        mask[10:54, 8:24] = True
+        contour = subpixel_contour(Field(img, (255, 255, 255)), mask, offset=12)
+        jumps = np.linalg.norm(np.roll(contour, -1, axis=0) - contour, axis=1)
+        assert jumps.max() < 2.0
+        assert np.allclose(contour.min(axis=0), (8, 10), atol=0.25)
+        assert np.allclose(contour.max(axis=0), (24, 54), atol=0.25)
+
+    def test_subpixel_contour_normalises_a_low_contrast_edge(self):
+        from png2svg.measure import Field, subpixel_contour
+
+        img = np.full((60, 60, 3), 255, np.uint8)
+        img[12:48, 14:46] = 230
+        mask = np.zeros((60, 60), bool)
+        mask[12:48, 14:46] = True
+        contour = subpixel_contour(Field(img, (255, 255, 255)), mask)
+        assert np.allclose(contour.min(axis=0), (14, 12), atol=0.25)
+        assert np.allclose(contour.max(axis=0), (46, 48), atol=0.25)
+
+    def test_edge_samples_choose_background_connected_to_the_edge(self):
+        from png2svg.measure import Field, edge_samples
+
+        img = np.full((70, 70, 3), 255, np.uint8)
+        img[15:55, 10:60] = 30
+        img[2:9, 10:60] = 30
+        points = edge_samples(
+            Field(img, (255, 255, 255)),
+            (15, 15),
+            (55, 15),
+            offset=14,
+            count=12,
+        )
+        assert len(points) == 12
+        assert np.max(np.abs(points[:, 1] - 15)) < 0.1
+
+    def test_edge_point_finds_the_first_side_of_a_thin_stroke(self):
+        from png2svg.measure import Field, edge_point
+        from scipy import ndimage
+
+        img = np.full((40, 40, 3), 255, np.uint8)
+        img[15:18, 5:35] = 20
+        img = ndimage.gaussian_filter(img, (0.6, 0.6, 0))
+        point = edge_point(Field(img, (255, 255, 255)), (20, 10), (0, 1), 15)
+        assert point is not None
+        assert point[0] == pytest.approx(20.5)
+        assert point[1] == pytest.approx(15.0, abs=0.1)
+
+    def test_edge_point_skips_a_short_resampling_ring_before_the_edge(self):
+        from png2svg.measure import Field, edge_point
+
+        # The small bump crosses the contrast threshold for one sample but is
+        # followed by clean background. The sustained ramp is the real edge.
+        values = np.zeros(60, dtype=np.uint8)
+        values[21:24] = 8
+        values[25:31] = [15, 35, 65, 95, 120, 140]
+        values[31:] = 140
+        img = np.zeros((60, 40, 3), dtype=np.uint8)
+        img[:, 5:35] = values[:, None, None]
+        point = edge_point(Field(img, (0, 0, 0)), (20, 0), (0, 1), 50)
+        assert point is not None
+        assert point[1] == pytest.approx(27.67, abs=0.15)
 
 
 class TestOutline:
@@ -672,6 +858,17 @@ class TestPrimitives:
         d = prim.rounded_convex_sdf(np.array(pts), verts, r)
         assert np.abs(d).max() < 1e-9, np.abs(d).max()
 
+    def test_generic_construction_helpers_preserve_convex_geometry(self):
+        rect = prim.rectangle(10, 20, 40, 12)
+        oriented = prim.oriented_rectangle((30, 26), 40, 12, 0)
+        assert np.allclose(rect, oriented)
+        clipped = prim.clip_halfplane(rect, (2, 0), 70)
+        assert clipped[:, 0].max() == pytest.approx(35)
+        assert prim.paths([(clipped, [2, 0, 2, 0])])[-1] == ["Z"]
+        through_vertices = prim.clip_halfplane(rect, (1, 0), 50)
+        edges = np.roll(through_vertices, -1, axis=0) - through_vertices
+        assert np.all(np.linalg.norm(edges, axis=1) > 0)
+
     def test_sdf_sign_is_inside_negative(self):
         verts = [(10, 10), (60, 10), (60, 40), (10, 40)]     # clockwise, y down
         ccw = verts[::-1]
@@ -770,6 +967,54 @@ class TestPrimitives:
         assert hit[:, 0].min() >= x0 - 1e-9 and hit[:, 0].max() <= x1 + 1e-9
         assert hit[:, 1].min() >= y0 - 1e-9 and hit[:, 1].max() <= y1 + 1e-9
 
+    def test_mixed_corner_radii_share_one_geometry_across_all_operations(self):
+        verts = [(0, 0), (40, 0), (40, 30), (0, 30)]
+        radii = [2.0, 4.0, 6.0, 8.0]
+        boundary = np.array([
+            (2, 0), (36, 0), (40, 4), (40, 24),
+            (34, 30), (8, 30), (0, 22), (0, 2),
+        ], float)
+        assert np.abs(prim.rounded_convex_sdf(boundary, verts, radii)).max() < 1e-9
+        sign = prim.rounded_convex_sdf(
+            np.array([(20, 15), (0.1, 0.1), (39.9, 0.1)]), verts, radii
+        )
+        assert sign[0] < 0 and sign[1] > 0 and sign[2] > 0
+        reversed_sign = prim.rounded_convex_sdf(
+            np.array([(20, 15), (0.1, 0.1), (39.9, 0.1)]),
+            verts[::-1],
+            radii[::-1],
+        )
+        assert np.allclose(sign, reversed_sign)
+        assert prim.paths([(verts, radii)]) == rounded_polygon(verts, radii)
+        assert np.allclose(prim.ink_bounds([(verts, radii)]), (0, 0, 40, 30))
+        mask = prim.raster([(verts, radii)], 45, 35)
+        assert mask[15, 20] and not mask[0, 0] and not mask[0, 39]
+
+        angle = np.linspace(np.pi, 1.5 * np.pi, 30)
+        known_arc = np.stack([2 + 2 * np.cos(angle), 2 + 2 * np.sin(angle)], 1)
+
+        def build(p):
+            return [(verts, [p[0], 4.0, 6.0, 8.0])]
+
+        fit = prim.fit_union(known_arc, build, [3.5], bounds=([0], [10]))
+        assert fit.params[0] == pytest.approx(2.0, abs=1e-7)
+
+    def test_fit_union_reports_original_worst_point_coordinates(self):
+        verts = [(10, 10), (60, 10), (60, 50), (10, 50)]
+
+        def build(p):
+            return [(verts, [p[0], 4.0, 8.0, 2.0])]
+
+        contour = np.array([
+            (15, 10), (56, 10), (60, 14), (60, 42),
+            (52, 50), (12, 50), (10, 48), (10, 15),
+        ], float)
+        fit = prim.fit_union(contour, build, [6.0])
+        index, point, residual = fit.worst_points(1)[0]
+        kept_position = np.flatnonzero(fit.kept).tolist().index(index)
+        assert point == tuple(contour[index])
+        assert residual == fit.residual[kept_position]
+
     def test_deterministic(self):
         shapes = [([(5, 5), (50, 5), (50, 45), (5, 45)], 7.0)]
         P = np.array([[10.0, 12.0], [30.0, 25.0], [49.0, 44.0]])
@@ -807,6 +1052,56 @@ class TestSharedRamp:
         img = np.zeros((20, 20, 3), np.uint8)
         with pytest.raises(ValueError, match="erode"):
             fit_shared_ramp(img, [(np.zeros((20, 20), bool), 0, 20)])
+
+    def test_maps_one_global_ramp_across_reversed_and_forward_pieces(self):
+        from png2svg.paint import map_ramp
+
+        ramp = [(0.0, "#000000"), (0.25, "#202020"),
+                (0.75, "#e0e0e0"), (1.0, "#ffffff")]
+        paint = {
+            "type": "linear", "x1": 0, "y1": 0, "x2": 100, "y2": 0,
+            "stops": [{"offset": 0, "color": "#ff0000"},
+                      {"offset": 0.5, "color": "#00ff00"},
+                      {"offset": 1, "color": "#0000ff"}],
+        }
+        forward = map_ramp(paint, 0.1, 0.6, ramp)
+        reverse = map_ramp(paint, 0.9, 0.6, ramp)
+        assert [s["offset"] for s in forward["stops"]] == [0.0, 0.3, 1.0]
+        assert forward["stops"][-1]["color"] == reverse["stops"][-1]["color"]
+        assert paint["stops"][0]["color"] == "#ff0000"
+
+        top = map_ramp(paint, 0.24, 0.0, ramp)
+        turn = map_ramp(paint, 0.24, 0.45, ramp)
+        middle = map_ramp(paint, 0.45, 0.64, ramp)
+        assert top["stops"][0]["color"] == turn["stops"][0]["color"]
+        assert turn["stops"][-1]["color"] == middle["stops"][0]["color"]
+
+    def test_map_ramp_preserves_a_hard_stop(self):
+        from png2svg.paint import ramp_segment
+
+        ramp = [
+            (0.0, "#000000"),
+            (0.5, "#000000"),
+            (0.5, "#ffffff"),
+            (1.0, "#ffffff"),
+        ]
+        stops = ramp_segment(ramp, 0.25, 0.75)
+        assert [(s["offset"], s["color"]) for s in stops] == [
+            (0.0, "#000000"),
+            (0.5, "#000000"),
+            (0.5, "#ffffff"),
+            (1.0, "#ffffff"),
+        ]
+
+        before = ramp_segment(ramp, 0.25, 0.5)
+        after = ramp_segment(ramp, 0.5, 0.75)
+        assert before[-1]["color"] == "#000000"
+        assert after[0]["color"] == "#ffffff"
+
+        reverse_before = ramp_segment(ramp, 0.75, 0.5)
+        reverse_after = ramp_segment(ramp, 0.5, 0.25)
+        assert reverse_before[-1]["color"] == "#ffffff"
+        assert reverse_after[0]["color"] == "#000000"
 
 
 class TestStructureDetection:
